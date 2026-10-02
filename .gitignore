@@ -1,0 +1,52 @@
+# Virtual environments (recreate with: pip install -r requirements.txt)
+.venv/
+venv/
+env/
+
+# Python bytecode / build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+build/
+dist/
+*.egg-info/
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+
+# Backup artifacts (produced by the commands in DEVELOPMENT.md 的「备份」一节, then
+# moved off this disk). They are regenerated here before every copy, so ignoring
+# them keeps a stray `git add .` from committing a copy of the repository into
+# itself.
+AfterFrame-backup.bundle
+AfterFrame-source.zip
+
+# Preferences live here (settings_store.py): an INI file beside the project, so
+# they persist no matter how the app is launched. It is per-machine state, not
+# source, so it stays out of the repository.
+afterframe_settings.ini
+
+# 三份私有笔记：不进公开仓库，但保留在工作区继续使用。三者开头都写明了这一点。
+#   AGENTS.md   - 长期规则（写给自己/agent 的本机事实与约定）
+#   NOTES.md    - 任务笔记：进度、待办、排查经过（含本机路径）
+#   DEVNOTES.md - 原 README 全文：界面设计取舍、实测数据、试过又被否的方案
+AGENTS.md
+NOTES.md
+DEVNOTES.md
+
+# 发布前保存的完整 .git（含被替换掉的旧历史）。纯本地，绝不提交。
+.git-full-history/
+
+# 仓库的维护工具（提交闸门、发布审计、本机环境修复脚本）。它们服务于"发布这个仓库"
+# 这件事，而不是应用本身，所以不进仓库、也不随版本发布。工作区里保留继续使用。
+devtools/

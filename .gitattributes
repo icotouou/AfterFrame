@@ -1,0 +1,34 @@
+# Store every text file in the repository with LF line endings, so the repo is
+# byte-identical regardless of the platform it is cloned on. This overrides the
+# machine-level core.autocrlf setting.
+* text=auto eol=lf
+
+# Binary assets must never be normalized or diffed as text.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.icns binary
+*.bmp binary
+*.ttf binary
+*.otf binary
+*.woff binary
+*.woff2 binary
+*.pdf binary
+*.zip binary
+*.7z binary
+*.gz binary
+*.exe binary
+*.dll binary
+*.pyd binary
+*.so binary
+*.dylib binary
+*.mp3 binary
+*.flac binary
+*.ogg binary
+*.m4a binary
+*.wav binary
+*.wma binary
+*.psd binary
