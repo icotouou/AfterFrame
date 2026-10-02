@@ -147,6 +147,64 @@ git bundle verify AfterFrame-backup.bundle                # 应回 "records a co
   `-b main`，要么 clone 之后手动 `git checkout main`。实测过：不带 `-b main` 得到 0 个文件，
   带上得到 25 个、哈希全同。
 
+### 5.2 打包成单文件 exe（Nuitka）
+
+```powershell
+# 1. Nuitka 的缓存与临时目录。**必须设**，理由见下表的头两条。
+$env:NUITKA_CACHE_DIR = "$PWD\_build_tmp\cache"
+$env:TMPDIR = "$PWD\_build_tmp\tmp"; $env:TEMP = $env:TMPDIR; $env:TMP = $env:TMPDIR
+
+# 2. 编译
+.\.venv\Scripts\python.exe -m nuitka --standalone --onefile `
+  --windows-console-mode=disable `
+  --windows-icon-from-ico=afterframe.ico `
+  --include-data-file=afterframe.ico=afterframe.ico `
+  --enable-plugin=pyside6 `
+  --include-qt-plugins=multimedia `
+  --remove-output `
+  --output-filename=AfterFrame.exe run.py
+```
+
+`--remove-output` 让中间产物编完即删，只在当前目录留下 `AfterFrame.exe`（约 96 MB）。
+
+**每个参数都不是可选的**，而且它们失败的方式差别很大 —— 有的立刻报错，有的**静默降级**：
+
+| 参数 | 不写会怎样 |
+|---|---|
+| `NUITKA_CACHE_DIR` | Nuitka 把编译器探测结果缓存到 `%LOCALAPPDATA%\Nuitka\...`。写入被拦时编译**直接失败**（`SConsLockFailure: Timeout waiting for lock`）。`%TEMP%` 同理：Nuitka 与它派生的 SCons、`cl.exe` 都要在那里建临时文件。这两个变量只对**当前 shell 会话**有效，换窗口要重设 |
+| `--windows-console-mode=disable` | 运行时会弹一个黑色控制台窗口 |
+| `--windows-icon-from-ico` | exe 文件本身没有图标（**注意**：这只管 exe 图标，窗口图标是另一回事，见下） |
+| `--include-data-file` | `constants.resource_path()` 找不到 `afterframe.ico`，**窗口**与任务栏图标退回默认。两个图标参数管的是两件不同的事，都要写 |
+| `--enable-plugin=pyside6` | Qt 的 DLL 与插件不会被收集 |
+| `--include-qt-plugins=multimedia` | **静默降级**：Qt 找不到媒体后端，`QMediaPlayer` 不可用，于是封面取不到、搓碟退回模拟效果。**不报错** —— 见下 |
+
+#### 为什么 `--include-qt-plugins=multimedia` 必须显式写
+
+Nuitka 4.2.2 的 `PySidePyQtPlugin._getSensiblePlugins()` 里，默认包含的 Qt 插件白名单写的是
+**`mediaservice`** —— 那是 PySide6 6.5 及更早的目录名。PySide6 6.6 起改名为 **`multimedia`**，
+而白名单是用 `hasPluginFamily(name)` 过滤的，名字对不上就**整个目录被跳过，且没有任何提示**。
+
+后果不是崩溃，而是"能用但变弱"：`afterframe/scratch_engine.py` 用
+`_MULTIMEDIA_OK and shutil.which("ffmpeg")` 判断能否启用 PCM 引擎，前者为假时 `ffmpeg_available()`
+永远返回假 —— **真倒放搓碟静默变成模拟效果**，同时内嵌封面也读不到。
+
+**自查方法**：编完看 `AfterFrame.exe` 的体积，以及产物树里有没有那个后端：
+
+```powershell
+Get-ChildItem run.dist -Recurse -Filter '*mediaplugin*'   # 应有 ffmpegmediaplugin.dll
+```
+
+带了多媒体组件时约 **96 MB**，漏掉时约 **78 MB** —— **18 MB 的差距就是它**。
+
+#### 控制台窗口闪一下
+
+`ffmpeg` 与 `ffprobe` 都是控制台程序，而 GUI 进程没有自己的控制台，Windows 会给每个子进程新建
+一个。**从源码运行时看不见**：`python.exe` 本来就有控制台，子进程直接继承。打包后没有可继承的
+控制台，窗口就显形了 —— 切歌时会闪**两个**（一次读歌词、一次读曲目详情）。
+
+所有 `subprocess` 调用都要经过 `constants.no_window_kwargs()`（内部是 `CREATE_NO_WINDOW`）。
+漏掉一处不会报错，只是多一个黑框，所以新增外部命令调用时记得带上它。
+
 ## 6. 可自定义项
 
 改观感/手感时，绝大多数旋钮都在这些地方。**注意**：这些常量大多带一段"为什么是这个值"的实测
@@ -215,8 +273,12 @@ Segoe UI → Arial）；侧边栏与标题栏的图标字形单独使用 `Segoe 
 
 - **侧边栏尺寸**：`page_stack.py` 的 `Sidebar` 中 `WIDTH`、`ICON_SIZE`、`ACCENT_WIDTH`。
 - **弹簧拖拽手感**：`window.py` 的 `_update_spring_physics()` 中 `stiffness` 与 `damping`。
-- **最小化方向**：`window.py` 的 `_taskbar_target_rect()` 中 `scale` 与目标位置逻辑。Windows 11
-  任务栏图标位置无法通过常规窗口句柄获取，目前回退到任务栏中心。
+- **最小化 / 关闭动画**：`window.py` 的 `_MinimizeAnimator`（顶层覆盖层）播一个 **CRT 关机式的
+  就地坍缩**，然后才真正最小化；时长是 `constants.MINIMIZE_SHUTDOWN_DURATION`。开播之前先让磨砂
+  外壳淡成平色（`CHROME_FLAT_DURATION`），快照因此拍到的是窗口"真实的样子"而不是磨砂状态。
+  动画**不飞向任务栏**，所以不存在"对准任务栏图标"的问题。
+  > 早先的实现是飞向任务栏图标，而那个位置拿不到（Windows 11 的任务栏图标不是普通窗口），
+  > 只能回退到任务栏中心——那条限制随实现一起换掉了，**别再照旧描述写文档**。
 - **侧边栏 / 标题栏配色**：`theme.py` 的 `PAGE_THEMES` 按页面索引调整，每项可改 `chrome_base`
   （垫在白洗下面的不透明底色——没材质时以及最小化/关闭预过渡的终点就是它）、`chrome_bg`（白洗）、
   边框、图标常态/悬停色、文字色与控制按钮配色；`ThemeAnimator` 的 `duration` 控制渐变时长。
