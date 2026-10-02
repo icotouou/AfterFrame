@@ -11,6 +11,18 @@ build/
 dist/
 *.egg-info/
 
+# Nuitka / PyInstaller output. Both name their directories after the entry script, so the
+# generic build/ and dist/ above do not catch them: `nuitka --onefile run.py` produces
+# run.build/, run.dist/ and run.onefile-build/ (hundreds of MB with PySide6), and
+# PyInstaller adds run.spec. Packaging is meant to happen outside the repository, but these
+# are ignored so that a stray `git add -A` cannot commit build output.
+*.build/
+*.dist/
+*.onefile-build/
+*.spec
+*.exe
+*.manifest
+
 # Tooling caches
 .pytest_cache/
 .mypy_cache/
