@@ -1,10 +1,15 @@
 import sys
 
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QIcon
 from PySide6.QtWidgets import QApplication
 
 from afterframe import ncm
-from afterframe.constants import TOOLTIP_STYLE, active_font_stack, use_preferred_font
+from afterframe.constants import (
+    TOOLTIP_STYLE,
+    active_font_stack,
+    resource_path,
+    use_preferred_font,
+)
 from afterframe.media_log import quiet_ffmpeg_log
 from afterframe.window import AfterFrameWindow
 
@@ -13,6 +18,14 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("AfterFrame")
     app.setApplicationDisplayName("AfterFrame")
+
+    # Application-level, so every window and dialog picks it up. Without it the taskbar
+    # shows Qt's default: this is a frameless window and its wordmark is drawn in
+    # paintEvent, so nothing else ever supplied an icon.
+    #
+    # The executable's own icon comes from the build (--icon / --windows-icon-from-ico);
+    # this is the other half, for the window that is running.
+    app.setWindowIcon(QIcon(str(resource_path("afterframe.ico"))))
 
     # Qt's FFmpeg backend prints a full stream listing to stderr for every
     # loaded track; that is libavformat talking, not Qt's logger, so it needs

@@ -1,3 +1,5 @@
+import sys
+
 from PySide6.QtCore import QEasingCurve
 from PySide6.QtGui import QFont
 
@@ -155,6 +157,35 @@ APP_NAME = "AfterFrame"
 # The "v" lives here because it is presentation: the interface puts it through .upper()
 # on the way out.
 APP_VERSION = "v" + __version__
+
+
+def resource_path(name: str):
+    """Locate a bundled data file in both a source checkout and a frozen build.
+
+    A packaged build does not keep the source layout, so a plain relative path works while
+    developing and then fails in the build -- the one place that is awkward to debug. The
+    frozen layouts differ per tool and are not something to guess at, so this tries the
+    known locations in order rather than branching on tool-specific globals:
+
+      * beside the executable          -- Nuitka onefile extracts its data next to it
+      * PyInstaller's unpack directory -- `sys._MEIPASS`, when it is set
+      * the repository root            -- running from source
+
+    Returns a Path; callers decide what to do when the file is not there.
+    """
+    from pathlib import Path
+
+    candidates = [Path(sys.executable).resolve().parent / name]
+    bundle = getattr(sys, "_MEIPASS", None)
+    if bundle:
+        candidates.append(Path(bundle) / name)
+    candidates.append(Path(__file__).resolve().parent.parent / name)
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[-1]
+
+
 # One interface font everywhere: a sans-serif (黑体) that covers both Latin and
 # CJK, so titles, lyrics and lists stay easy to read.
 UI_FONT_FAMILY = "Microsoft YaHei UI"
