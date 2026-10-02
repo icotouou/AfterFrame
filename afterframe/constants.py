@@ -1,3 +1,4 @@
+import subprocess
 import sys
 
 from PySide6.QtCore import QEasingCurve
@@ -157,6 +158,25 @@ APP_NAME = "AfterFrame"
 # The "v" lives here because it is presentation: the interface puts it through .upper()
 # on the way out.
 APP_VERSION = "v" + __version__
+
+
+def no_window_kwargs() -> dict:
+    """Extra subprocess arguments that keep a console from flashing on Windows.
+
+    Every external tool this app runs -- ffmpeg, ffprobe -- is a console program. A GUI
+    process has no console of its own, so Windows hands each child a brand new one, which
+    shows up as a black window for the life of the call. Running from source that is masked:
+    python.exe already owns a console and the children inherit it. The packaged build runs
+    with ``--windows-console-mode=disable``, so there is nothing to inherit and the windows
+    become visible -- most obviously on a track change, which shells out to ffprobe twice
+    (once for lyrics, once for the track details), hence two flashes per song.
+
+    Guarded with hasattr because the flag is Windows-only, and callers pass this straight
+    into subprocess, so it has to stay harmless elsewhere.
+    """
+    if hasattr(subprocess, "CREATE_NO_WINDOW"):
+        return {"creationflags": subprocess.CREATE_NO_WINDOW}
+    return {}
 
 
 def resource_path(name: str):

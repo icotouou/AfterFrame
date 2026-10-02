@@ -105,6 +105,7 @@ from .constants import (
     INFO_SCROLL_TAIL_PAUSE_MS,
     LYRICS_ALIGNMENTS,
     MUSIC_SOURCE_NCM,
+    no_window_kwargs,
     PAGE_TINT_ALPHA,
     PAGE_TINT_COLOR,
     SUPPORTED_AUDIO_EXTS,
@@ -2449,6 +2450,8 @@ class ToyPage(QWidget):
                 errors="replace",
                 timeout=10,
                 check=False,
+                # Without this each ffprobe opens its own console window.
+                **no_window_kwargs(),
             )
             if result.returncode != 0 or not result.stdout:
                 return ""
@@ -2586,6 +2589,8 @@ class ToyPage(QWidget):
                 errors="replace",
                 timeout=10,
                 check=False,
+                # This one runs on every track change; without it the console flashes.
+                **no_window_kwargs(),
             )
             if result.returncode != 0 or not result.stdout:
                 return

@@ -41,6 +41,8 @@ import subprocess
 import tempfile
 from dataclasses import dataclass, field
 
+from .constants import no_window_kwargs
+
 NCM_MAGIC = b"CTENFDAM"
 
 # The two AES-128-ECB keys the format uses.
@@ -410,7 +412,7 @@ def _looks_like_audio(path: str) -> bool:
              "-show_entries", "stream=codec_name,sample_rate", "-of", "default=nw=1:nk=1",
              path],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=60, check=False,
+            timeout=60, check=False, **no_window_kwargs(),
         )
     except Exception:
         return True

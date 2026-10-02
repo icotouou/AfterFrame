@@ -36,6 +36,8 @@ from array import array
 
 from PySide6.QtCore import QElapsedTimer, QObject, QTimer, Signal
 
+from .constants import no_window_kwargs
+
 try:
     from PySide6.QtMultimedia import QAudio, QAudioFormat, QAudioSink, QMediaDevices
 
@@ -297,12 +299,12 @@ class VinylAudioEngine(QObject):
             "-acodec", "pcm_s16le", "-ar", str(_SAMPLE_RATE), "-ac", "2",
             "-f", "s16le", "pipe:1",
         ]
-        kwargs = {}
-        if hasattr(subprocess, "CREATE_NO_WINDOW"):
-            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
         try:
             proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **kwargs
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                **no_window_kwargs(),
             )
         except Exception:
             self._fail_decode(gen)
