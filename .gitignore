@@ -62,3 +62,9 @@ DEVNOTES.md
 # 仓库的维护工具（提交闸门、发布审计、本机环境修复脚本）。它们服务于"发布这个仓库"
 # 这件事，而不是应用本身，所以不进仓库、也不随版本发布。工作区里保留继续使用。
 devtools/
+
+# Nuitka's compiler cache and downloads during packaging. They have to live
+# somewhere writable, and NUITKA_CACHE_DIR / TMPDIR point here because this tree is
+# the writable place on this machine; the directory holds thousands of small files.
+# Build output (run.build/, run.dist/, *.exe) is covered by the rules above.
+_build_tmp/
