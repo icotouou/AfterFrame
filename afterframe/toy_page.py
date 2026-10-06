@@ -1533,6 +1533,11 @@ class ToyPage(QWidget):
         self._color_size_seen = None
         self._color_settle_clock = 0.0
         self._cover = self._create_placeholder_cover()
+        # Which track the pixmap in `_cover` belongs to. Reloading the same file must keep it:
+        # Qt does not re-announce metadata for a source it is already playing (measured: zero
+        # `metaDataChanged` emissions on a repeat `setSource`), so anything cleared on reload
+        # stays cleared.
+        self._cover_path: str | None = None
         # Container the file on disk uses, when it differs from the audio the
         # backend actually plays (an unpacked ncm). Shown before the format.
         self._source_label = ""
@@ -2217,15 +2222,24 @@ class ToyPage(QWidget):
         self._load_track(self._playlist[index], auto_play=True)
         self._playlist_panel.set_songs(self._playlist, self._playlist_index)
 
-    def _reset_track_state(self) -> bool:
+    def _reset_track_state(self, next_path: str | None = None) -> bool:
         """Clear everything describing the track on screen.
 
         Returns whether lyrics were displayed before, so the caller can decide
         how to animate the lyrics panel. The panel itself is not touched here:
         a track change keeps it in place while simply clearing the folder
         should slide it away.
+
+        *next_path* is the track about to be loaded. When it is the same file that is already
+        displayed, the cover and its palette are kept: reloading a track must not blank the
+        artwork, and Qt will not hand it back. Measured on the real widget -- a plain
+        `setSource(url)` for the URL already playing emits `metaDataChanged` **zero** times,
+        while a first load emits it once. So clearing the cover here and waiting for the signal
+        to restore it works once and then leaves the placeholder (or, on files whose metadata
+        offers only `ThumbnailImage`, silently drops from full size to the 256 px thumbnail).
         """
         had_lyrics = self._has_lyrics()
+        reloading_same = next_path is not None and next_path == self._current_track
         self._song_title = ""
         self._song_artist = ""
         self._album = ""
@@ -2233,15 +2247,18 @@ class ToyPage(QWidget):
         self._lyric_height_cache.clear()
         self._track_info = {}
         self._info_scroll = {}
-        self._cover = self._create_placeholder_cover()
+        if not reloading_same:
+            self._cover = self._create_placeholder_cover()
+            self._cover_path = None
         self._source_label = ""
         self._container_cover = None
         self._duration = 0
         self._progress_slider.set_target(0.0)
         self._update_vinyl_label_color()
-        self._apply_music_palette(
-            ColorExtractor.extract_palette(self._cover, count=5)
-        )
+        if not reloading_same:
+            self._apply_music_palette(
+                ColorExtractor.extract_palette(self._cover, count=5)
+            )
 
         # Reset lyrics scrolling state.
         self._lyrics_scroll_offset = 0.0
@@ -2258,7 +2275,7 @@ class ToyPage(QWidget):
         return had_lyrics
 
     def _load_track(self, path: str, auto_play: bool = False) -> None:
-        old_has_lyrics = self._reset_track_state()
+        old_has_lyrics = self._reset_track_state(path)
         self._current_track = path
         self._song_title = os.path.splitext(os.path.basename(path))[0]
         self._song_artist = "未知艺术家"
@@ -2291,6 +2308,7 @@ class ToyPage(QWidget):
             if cover is not None:
                 self._container_cover = cover
                 self._cover = cover
+                self._cover_path = path
 
         self._load_lyrics(play_path)
         self._load_track_info(play_path)
@@ -2995,10 +3013,13 @@ class ToyPage(QWidget):
                 cover = meta.value(QMediaMetaData.ThumbnailImage)
         if isinstance(cover, QPixmap):
             self._cover = cover
+            self._cover_path = self._current_track
         elif isinstance(cover, QImage):
             self._cover = QPixmap.fromImage(cover)
+            self._cover_path = self._current_track
         elif self._container_cover is not None:
             self._cover = self._container_cover
+            self._cover_path = self._current_track
         self._update_vinyl_label_color()
         self._apply_music_palette(
             ColorExtractor.extract_palette(self._cover, count=5)
