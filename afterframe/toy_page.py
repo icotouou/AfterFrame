@@ -2323,12 +2323,21 @@ class ToyPage(QWidget):
             self._duration = ncm_track.duration_ms
 
         # Prefer the PCM turntable engine; fall back to QMediaPlayer.
+        #
+        # The engine has to be stopped explicitly when it is not the chosen backend. `open()`
+        # stops the previous stream itself, but turning PCM off in the settings skips `open()`
+        # entirely -- so the engine kept playing whatever it had, and the QMediaPlayer then
+        # started on top of it, which put two audio streams out at once. The same applies when
+        # `open()` fails and the player takes over.
         self._audio_backend = "qt"
-        if (
+        if not (
             self._pcm_enabled
             and self._engine is not None
             and self._engine.open(play_path)
         ):
+            if self._engine is not None:
+                self._engine.stop()
+        else:
             self._audio_backend = "pcm"
 
         self._update_lyrics_panel(old_has_lyrics, self._has_lyrics())
