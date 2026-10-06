@@ -1429,6 +1429,100 @@ LYRICS_COPY_FLASH_PEAK = 1.0
 # visibly bright and popped.
 LYRICS_COPY_FLASH_CUTOFF = 0.002
 
+# Line-change motion.
+#
+# The whole list used to move as one rigid block: a single scroll offset shared by every line,
+# plus an instant font-size jump on the active one. That is why a line change read as a snap --
+# nothing in the panel ever overshot or lagged, so there was no sense of weight.
+#
+# Three motions now combine, each independently switchable so the feel can be tuned by editing
+# numbers rather than re-reading the drawing code:
+#
+#   * per line, a spring offset. The incoming line starts LIFT px below and springs up through
+#     zero; the outgoing line is pushed PUSH px up and springs back.
+#   * the list's own scroll offset, also spring driven. The old code eased 12% per frame toward
+#     the target, which approaches forever and never overshoots: soft arrival, no weight, and a
+#     long tail.
+#   * a per-line start delay, so the motion travels down the list as a wave instead of arriving
+#     everywhere at once. The delay decays to zero over WAVE_SPAN lines; without that decay a
+#     thirty-line list would queue up well over a second.
+#
+# Both springs are described physically: OMEGA is the undamped natural frequency in radians per
+# second (higher = faster) and RATIO is the fraction of critical damping (1.0 = fastest arrival
+# with no overshoot, lower = bouncier). Keep them physical -- the frame-based recursive form the
+# resize spring uses elsewhere in this file takes numbers of a different kind entirely, and
+# feeding those to this integrator makes every combination diverge.
+# The line that arrives. Tuned for a visible but not showy bounce: this spring overshoots
+# about 11% of its travel and reverses twice. Measured, raising the ratio further drops it to
+# a single reversal and an overshoot under 2 px, at which point it stops reading as a bounce
+# and the line simply arrives.
+LYRICS_LINE_SPRING_OMEGA = 22.0
+LYRICS_LINE_SPRING_RATIO = 0.55
+# The lines that ride along with the ripple. Deliberately not the same spring: at the values
+# above they overshot too, so the whole panel wobbled and that competed with the arriving line
+# for attention. These arrive with no overshoot and no reversal at all -- the panel settles, and
+# the only thing that bounces is the line that just became current.
+LYRICS_RIPPLE_SPRING_OMEGA = 26.0
+LYRICS_RIPPLE_SPRING_RATIO = 0.9
+# How far below its resting place the incoming line starts. Large, because this is the one
+# motion that belongs to a single line; everything else moves together.
+LYRICS_LINE_LIFT_PX = 28.0
+# How far the outgoing line is pushed up. 0 disables the push entirely.
+#
+# Off by default. The line being left behind already travels one whole row as the list scrolls,
+# and that travel is the most legible motion on screen -- a recognisable object moving a full
+# row -- so a push only made it louder and made the change read as the OLD line moving. It now
+# does nothing of its own beyond the shared scroll.
+LYRICS_LINE_PUSH_PX = 0.0
+# Delay applied per line of distance from the line that changed.
+LYRICS_WAVE_STAGGER_MS = 12.0
+# How far the ripple displaces a line before it settles back. Small on purpose: this is the
+# secondary motion that makes the change travel down the list, not the movement itself.
+LYRICS_WAVE_PX = 16.0
+# Distance in lines over which the delay grows to its maximum. Short on purpose: the panel
+# should read as one sheet bending, which needs the differential motion concentrated near the
+# line that changed. A long span gives every nearby line almost the same delay, so they move as a
+# block and the arriving line's rise is lost against them.
+LYRICS_WAVE_SPAN = 5.0
+# How many lines join the ripple at all. Deliberately larger than the span, and larger than the
+# panel can show: when these were one number the ripple stopped partway down and the cut-off was
+# visible as a hard edge. The delay stops growing at the span; participation does not.
+LYRICS_WAVE_REACH = 40.0
+# Spring driving the list's scroll offset. Slightly under critical, so it lands with a hint of
+# weight rather than easing in.
+#
+# Deliberately quicker than the line spring. The scroll is the motion every line performs
+# together, and the longer it takes the more the panel appears to be travelling -- which is what
+# made the outgoing line look like it was doing something of its own.
+LYRICS_SCROLL_SPRING_OMEGA = 24.0
+LYRICS_SCROLL_SPRING_RATIO = 0.9
+# Below this the spring counts as settled and is dropped from the animation table. Chosen from
+# the measured step profile: the incoming line moves about 3 px per frame at the start and less
+# than 0.35 px per frame after ~190 ms. Continuing past that adds a crawl nobody can see, which
+# makes the motion read as uneven rather than as a smooth decay. Not raised further on purpose:
+# cutting while the line is still visibly off its resting place would pop.
+LYRICS_SPRING_SETTLE_PX = 0.35
+LYRICS_SPRING_SETTLE_V = 0.60
+# The arriving line settles on position alone. Its velocity passes through zero at the top of
+# the bounce, so any velocity gate tight enough to matter declares it settled at that peak -- and
+# for a spring the position threshold already bounds the speed (peak speed is about omega times
+# it), so the gate was only ever able to cut the motion short.
+#
+# The threshold must also be far below how far the spring travels in one frame. Measured, the
+# crossing frame takes it from +2.60 px to -0.07 px; at the 0.5 px this started at, that step
+# landed inside the threshold, the spring was deleted mid-flight, and the true overshoot of
+# -3.02 px was never reached -- the bounce was there in the maths and gone on screen.
+LYRICS_BOUNCE_SETTLE_PX = 0.05
+# How far into its rise the arriving line reaches full opacity, as a fraction of its travel.
+# This is the arrival's signature: the line being left already slides a full row along with
+# everything else, which reads as motion but not as an event, while a new line appearing where
+# nothing was reads as the event itself. 0 disables it and the line is simply opaque.
+LYRICS_ARRIVAL_FADE = 0.6
+
+# The active line grows from the idle size to this one, driven by the same spring.
+LYRICS_FONT_SIZE_IDLE = 17
+LYRICS_FONT_SIZE_ACTIVE = 19
+
 
 _PLACEHOLDER_COVER: QPixmap | None = None
 
@@ -1616,6 +1710,20 @@ class ToyPage(QWidget):
 
         # Lyrics scrolling / click-to-seek.
         self._lyrics_scroll_offset = 0.0
+        # Where the offset is heading. Kept apart from the offset itself because a spring needs
+        # a target to accelerate toward, where the old easing read it fresh each frame.
+        self._lyrics_scroll_target = 0.0
+        # Spring velocity for the offset above, so the list can overshoot slightly.
+        self._lyrics_scroll_velocity = 0.0
+        # Which line changed last, and when, so the per-line motion can be timed from it.
+        self._lyrics_anim_from = -1
+        self._lyrics_anim_to = -1
+        self._lyrics_active_seen = -1
+        # Frame time accumulated since the change, in ms. The same clock the springs use.
+        self._lyrics_anim_elapsed = 0.0
+        # index -> [offset, velocity] for the lines still moving. Only the handful near the
+        # active line ever animate, so this stays tiny; entries are dropped once settled.
+        self._lyrics_line_springs: dict[int, list[float]] = {}
         # Where the lines sit in their panel; the settings page changes it.
         self._lyrics_align = DEFAULT_LYRICS_ALIGN
         # Memoised lyric heights. The layout asks for every line's wrapped height
@@ -2262,6 +2370,13 @@ class ToyPage(QWidget):
 
         # Reset lyrics scrolling state.
         self._lyrics_scroll_offset = 0.0
+        self._lyrics_scroll_target = 0.0
+        self._lyrics_scroll_velocity = 0.0
+        self._lyrics_active_seen = -1
+        self._lyrics_anim_from = -1
+        self._lyrics_anim_to = -1
+        self._lyrics_anim_elapsed = 0.0
+        self._lyrics_line_springs.clear()
         self._lyrics_auto_follow = True
         self._lyrics_resume_timer.stop()
         self._lyrics_dragging = False
@@ -2760,7 +2875,10 @@ class ToyPage(QWidget):
         panel_h = self.height()
         avail_h = max(1, panel_h - 2 * LYRICS_EDGE_MARGIN)
         # Pin the active line about one third down the visible area (second row).
-        desired_active_top = LYRICS_EDGE_MARGIN + avail_h * 0.30
+        # One row higher than it used to sit. Measured row pitch is ~58 px against ~640 px
+        # of available height, so 0.21 puts the active line exactly one row above the old
+        # position (top y=214 instead of 272).
+        desired_active_top = LYRICS_EDGE_MARGIN + avail_h * 0.21
 
         active_offset = 0.0
         for i in range(active):
@@ -2844,11 +2962,200 @@ class ToyPage(QWidget):
         has_timing = any(t >= 0 for t, _ in self._lyrics)
         active = self._current_lyric_index() if has_timing else -1
 
+        # A change of active line is what sets the motion off. Detected here because this is
+        # the one place that already tracks which line is current.
+        if active != self._lyrics_active_seen:
+            self._start_lyrics_line_anim(self._lyrics_active_seen, active)
+            self._lyrics_active_seen = active
+
         if self._lyrics_auto_follow and has_timing and active >= 0:
             target = self._lyrics_scroll_target_for_active(active, max_w)
-            self._lyrics_scroll_offset += (target - self._lyrics_scroll_offset) * 0.12
+            # Spring rather than ease: the offset is integrated in
+            # _update_lyrics_line_springs, so it can pass the target and come back. The old
+            # form -- offset += (target - offset) * 0.12 -- could only ever approach.
+            self._lyrics_scroll_target = target
+        else:
+            self._lyrics_scroll_target = self._lyrics_scroll_offset
 
         self._clamp_lyrics_scroll_offset(max_w)
+
+    def _advance_spring(
+        self, value: float, velocity: float, target: float, omega: float,
+        damping_ratio: float, dt_ms: float,
+    ) -> tuple[float, float]:
+        """One step of a damped spring, in milliseconds.
+
+        *omega* is the undamped natural frequency in radians per second and *damping_ratio* the
+        fraction of critical damping: 1.0 arrives as fast as possible without overshooting,
+        below 1.0 overshoots, above 1.0 is sluggish. Both are physical quantities, so the same
+        pair gives the same motion at any frame rate.
+
+        Two earlier attempts were wrong in instructive ways. The first scaled velocity by
+        `damping ** dt` with damping as a per-millisecond retention, which was not tunable at
+        all: 0.62 destroyed 99.95% of the velocity every frame (no overshoot, the offset simply
+        collapsed onto the target) while 0.90 diverged. The second scaled the damping to the
+        spring but kept the constants of the frame-based recursive form used elsewhere in this
+        file (`v += (target - value) * k; v *= d`) -- those k values are per-frame, not per
+        second, and feeding them to an integrator working in seconds made every combination
+        diverge to thousands of pixels.
+        """
+        remaining = dt_ms
+        while remaining > 0.0:
+            # Sub-stepped so a long frame behaves like several short ones: the integrator is
+            # explicit and goes unstable once omega * dt grows large.
+            span = min(8.0, remaining)
+            remaining -= span
+            step = span / 1000.0
+            velocity += (-(omega * omega) * (value - target)
+                         - 2.0 * damping_ratio * omega * velocity) * step
+            value += velocity * step
+        return value, velocity
+
+    def _update_lyrics_line_springs(self, dt_ms: float) -> None:
+        """Advance the list's scroll spring and every line still rippling."""
+        if self._lyrics_dragging:
+            # A drag owns the offset; let the springs die rather than fight the pointer.
+            self._lyrics_scroll_velocity = 0.0
+            self._lyrics_line_springs.clear()
+            return
+
+        # The wave's clock is the same accumulated frame time the springs integrate against,
+        # not wall time. Mixing the two is what made an earlier attempt look broken: with the
+        # real clock, a line whose delay had not elapsed simply never moved, and any caller
+        # driving frames faster than real time saw the ripple stand still.
+        self._lyrics_anim_elapsed += dt_ms
+
+        self._lyrics_scroll_offset, self._lyrics_scroll_velocity = self._advance_spring(
+            self._lyrics_scroll_offset, self._lyrics_scroll_velocity,
+            self._lyrics_scroll_target,
+            LYRICS_SCROLL_SPRING_OMEGA, LYRICS_SCROLL_SPRING_RATIO, dt_ms,
+        )
+
+        if not self._lyrics_line_springs:
+            return
+
+        elapsed = self._lyrics_anim_elapsed
+        for index in list(self._lyrics_line_springs):
+            if elapsed < self._lyrics_wave_delay(index):
+                # This line has not joined in yet; the wave reaches it later.
+                continue
+            offset, velocity = self._lyrics_line_springs[index]
+            # The line that just became current bounces; the ones that merely travel with the
+            # ripple do not. Two springs, chosen from their measured overshoot.
+            if index == self._lyrics_anim_to:
+                omega, ratio = LYRICS_LINE_SPRING_OMEGA, LYRICS_LINE_SPRING_RATIO
+                settle_px, settle_v = LYRICS_BOUNCE_SETTLE_PX, None
+            else:
+                omega, ratio = LYRICS_RIPPLE_SPRING_OMEGA, LYRICS_RIPPLE_SPRING_RATIO
+                settle_px, settle_v = LYRICS_SPRING_SETTLE_PX, LYRICS_SPRING_SETTLE_V
+            offset, velocity = self._advance_spring(
+                offset, velocity, 0.0, omega, ratio, dt_ms,
+            )
+            if settle_v is None:
+                settled = abs(offset) < settle_px
+            else:
+                settled = abs(offset) < settle_px and abs(velocity) < settle_v
+            if settled:
+                # Dropped here, and _lyrics_line_offset reports exactly 0 for a line with no
+                # entry -- so the line lands on its resting place instead of the fraction of a
+                # pixel it happened to stop at. With the spring's overshoot larger than the
+                # settle threshold, that remainder was otherwise permanent.
+                del self._lyrics_line_springs[index]
+            else:
+                self._lyrics_line_springs[index] = [offset, velocity]
+
+    def _lyrics_wave_delay(self, index: int) -> float:
+        """Stagger for one line, in ms: grows with distance from the line that changed."""
+        origin = self._lyrics_anim_to if self._lyrics_anim_to >= 0 else self._lyrics_anim_from
+        if origin < 0:
+            return 0.0
+        return min(abs(index - origin), LYRICS_WAVE_SPAN) * LYRICS_WAVE_STAGGER_MS
+
+    def _lyrics_line_offset(self, index: int) -> float:
+        """Current ripple offset of one line, or 0 when it is at rest.
+
+        A line with no spring entry reports exactly 0, so the settle step lands it on its resting
+        place rather than on the fraction of a pixel it stopped at.
+
+        This deliberately does NOT zero small offsets by itself. An earlier version reported 0 for
+        anything under the settle threshold, and that silently ate the arriving line's overshoot:
+        with the bounce spring the overshoot around the crossing is only a few tenths of a pixel,
+        so the reading looked perfectly clean while the bounce was gone. What counts as settled
+        belongs to the spring that owns the value, not to this getter.
+        """
+        entry = self._lyrics_line_springs.get(index)
+        return 0.0 if entry is None else entry[0]
+
+    def _lyrics_arrival_alpha(self, index: int) -> float:
+        """Opacity multiplier for the line that just arrived, 0..1.
+
+        Rises to fully opaque as the line comes up, driven by the same displacement the font size
+        uses, so it needs no clock of its own. This is the arrival's signature: the line being
+        left slides a full row along with everything else, which reads as motion but not as an
+        event, while a line appearing where nothing was reads as the event.
+        """
+        if LYRICS_ARRIVAL_FADE <= 0.0 or LYRICS_LINE_LIFT_PX <= 0.0:
+            return 1.0
+        if index != self._lyrics_anim_to:
+            return 1.0
+        offset = self._lyrics_line_offset(index)
+        # offset runs LIFT -> 0 -> slightly past 0, so the first part is the arrival.
+        mix = 1.0 - max(0.0, min(1.0, offset / LYRICS_LINE_LIFT_PX))
+        return max(0.0, min(1.0, mix / LYRICS_ARRIVAL_FADE))
+
+    def _lyrics_line_font_size(self, index: int, is_active: bool) -> float:
+        """Font size for one line, animated between the idle and active sizes.
+
+        The active line used to switch between 17 and 19 with no transition, which is a visible
+        jolt at the moment the line changes. The line's own displacement doubles as the blend
+        here: the two sizes are the ends of its travel, so it grows on the way up and shrinks on
+        the way back with no separate progress value to keep.
+        """
+        if LYRICS_LINE_LIFT_PX <= 0.0:
+            return LYRICS_FONT_SIZE_ACTIVE if is_active else LYRICS_FONT_SIZE_IDLE
+        offset = self._lyrics_line_offset(index)
+        if is_active and self._lyrics_anim_to == index:
+            # offset runs LIFT -> 0 -> (overshoot below 0), so this runs 0 -> 1 -> past 1.
+            mix = 1.0 - max(-0.5, min(1.0, offset / LYRICS_LINE_LIFT_PX))
+        elif not is_active and self._lyrics_anim_from == index and LYRICS_LINE_PUSH_PX > 0.0:
+            mix = 1.0 - max(0.0, min(1.0, -offset / LYRICS_LINE_PUSH_PX))
+        else:
+            mix = 0.0
+        return (LYRICS_FONT_SIZE_ACTIVE * mix
+                + LYRICS_FONT_SIZE_IDLE * (1.0 - mix))
+
+    def _start_lyrics_line_anim(self, previous: int, current: int) -> None:
+        """Arm the motion a line change sets off.
+
+        Two things move, deliberately kept apart: the list's scroll spring carries the new line
+        to its resting place, and the ripple is a per-line displacement that decays back to
+        zero -- down the list, one line after another, so the change travels instead of arriving
+        everywhere at once.
+        """
+        self._lyrics_anim_from = previous
+        self._lyrics_anim_to = current
+        self._lyrics_anim_elapsed = 0.0
+        self._lyrics_line_springs.clear()
+        if current < 0:
+            return
+        # The ripple goes down first, then the two lines that have motion of their own
+        # overwrite it. The order matters: the outgoing line sits one line away from the
+        # incoming one, so it falls inside the ripple's range and would otherwise have its push
+        # replaced by the generic displacement and never move.
+        if LYRICS_WAVE_STAGGER_MS > 0.0:
+            for index in range(len(self._lyrics)):
+                if index == current or index == previous:
+                    # These two have motion of their own; the ripple is for the rest of the
+                    # panel. Skipping them matters more than it looks: with the outgoing push
+                    # set to zero there is nothing to overwrite a ripple seeded here, so the
+                    # line being left behind would still visibly move.
+                    continue
+                if 0 < abs(index - current) <= LYRICS_WAVE_REACH:
+                    self._lyrics_line_springs[index] = [LYRICS_WAVE_PX, 0.0]
+        # The incoming line starts below its resting place and springs up through it.
+        self._lyrics_line_springs[current] = [LYRICS_LINE_LIFT_PX, 0.0]
+        if previous >= 0 and previous != current and LYRICS_LINE_PUSH_PX > 0.0:
+            self._lyrics_line_springs[previous] = [-LYRICS_LINE_PUSH_PX, 0.0]
 
     # ------------------------------------------------------------------
     # Backend-agnostic playback helpers
@@ -3169,6 +3476,10 @@ class ToyPage(QWidget):
 
         # Frame-rate independent vinyl rotation and scratch audio sync.
         dt_ms = max(0.0, min(self._tick_elapsed_timer.restart(), 100.0))
+
+        # Advance the motion a line change starts. Timed from the frame delta so the springs
+        # behave the same at any refresh rate.
+        self._update_lyrics_line_springs(dt_ms)
 
         # Marquee the title / artist+album lines when they overflow their column.
         self._update_info_scroll(dt_ms)
@@ -5044,7 +5355,7 @@ class ToyPage(QWidget):
                 break
 
             is_active = i == active
-            font = ui_font(19 if is_active else 17)
+            font = ui_font(int(round(self._lyrics_line_font_size(i, is_active))))
             font.setWeight(QFont.Bold)
             painter.setFont(font)
 
@@ -5053,6 +5364,11 @@ class ToyPage(QWidget):
             block_h = br.height()
 
             # Skip entries entirely above the panel.
+            # The line's own ripple, over the list's scroll. Held apart from `y` so the
+            # layout walk stays on the rig -- folding it into `y` would shift every line
+            # after this one by the same amount.
+            draw_y = y + self._lyrics_line_offset(i)
+
             if y + block_h <= rect.top():
                 y += block_h + LYRICS_ENTRY_GAP
                 continue
@@ -5062,7 +5378,7 @@ class ToyPage(QWidget):
             base_alpha = 255 if is_active else max(50, 190 - dist * 55)
 
             # Edge fade so lyrics don't sit hard against the top/bottom.
-            center_y = y + block_h / 2
+            center_y = draw_y + block_h / 2
             if center_y < visible_top:
                 edge_factor = max(0.0, 1.0 - (visible_top - center_y) / fade_zone)
             elif center_y > visible_bottom:
@@ -5071,6 +5387,9 @@ class ToyPage(QWidget):
                 edge_factor = 1.0
 
             alpha = int(base_alpha * edge_factor)
+            arrival = self._lyrics_arrival_alpha(i)
+            if arrival < 1.0:
+                alpha = int(alpha * arrival)
             if alpha > 0:
                 # The just-copied line flashes: its glyphs brighten toward solid
                 # white. Nothing is painted behind them -- no block, no halo.
@@ -5082,9 +5401,16 @@ class ToyPage(QWidget):
                     flash = self._lyric_copy_flash * edge_factor
                     alpha = int(alpha + (255 - alpha) * flash * LYRICS_COPY_FLASH_PEAK)
                 painter.setPen(QColor(255, 255, 255, alpha))
-                painter.drawText(QRect(x, y, max_w, block_h), text_flags, line)
+                # Drawn from a fractional y on purpose. Rounding to whole pixels makes the
+                # slow tail of a spring jump 0 or 2 px per frame instead of 1, which reads
+                # as stutter even though the frame rate is fine; Qt places text on
+                # fractional coordinates and at this machine's scale that is the smoother
+                # of the two.
+                painter.drawText(QRectF(x, draw_y, max_w, block_h), text_flags, line)
                 # Clickable even if faded near the edges.
-                self._lyrics_hit_rects.append((QRect(x, y, max_w, block_h), i))
+                # The clickable area stays on whole pixels: it is compared against mouse
+                # positions, and a fractional rect there buys nothing.
+                self._lyrics_hit_rects.append((QRect(x, int(draw_y), max_w, block_h), i))
 
             y += block_h + LYRICS_ENTRY_GAP
 
