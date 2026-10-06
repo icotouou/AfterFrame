@@ -35,6 +35,7 @@ from PySide6.QtGui import (
     QPixmap,
     QPolygonF,
     QRadialGradient,
+    QRegion,
     QTransform,
 )
 from PySide6.QtWidgets import (
@@ -99,11 +100,14 @@ from .constants import (
     COLOR_SHAPE_MIST_ALPHA,
     COLOR_SHAPE_SPIN_DEG_PER_S,
     DEFAULT_LYRICS_ALIGN,
+    DEFAULT_LYRICS_SIZE,
     HEADING_WEIGHT,
     INFO_SCROLL_HEAD_PAUSE_MS,
     INFO_SCROLL_SPEED_PX_S,
     INFO_SCROLL_TAIL_PAUSE_MS,
     LYRICS_ALIGNMENTS,
+    LYRICS_SIZES,
+    DEFAULT_LYRICS_FADE,
     MUSIC_SOURCE_NCM,
     no_window_kwargs,
     PAGE_TINT_ALPHA,
@@ -1519,6 +1523,64 @@ LYRICS_BOUNCE_SETTLE_PX = 0.05
 # nothing was reads as the event itself. 0 disables it and the line is simply opaque.
 LYRICS_ARRIVAL_FADE = 0.6
 
+# How much the non-active lines are shrunk before being scaled back up, when the visualiser is the
+# colour one. This is the blur radius: 1 would be no blur at all, and larger values are softer.
+# Qt exposes no "blur this pixmap", so shrink-and-grow is the mechanism.
+#
+# Set high on purpose. Measured at 3.0 -- the first value -- only 16% of the panel changed and the
+# words stayed readable: a 37 px line reduced to a third and grown back keeps its letterforms. The
+# panel is meant to look like the lyrics dissolved into the background, so the strokes have to go.
+#
+# Note the returns: averaging a bright stroke over a dark panel can only dilute it so far, so
+# raising this past 8 buys very little and the dimming below does the rest of the work.
+LYRICS_BLUR_SHRINK = 2.5
+# Dimming for the non-active lines under the colour visualiser, applied to the whole layer.
+#
+# This is what does most of the work, and it is the knob to turn for feel. Measured at 0.65 with a
+# blur radius of 8: the brightest pixel of a non-active line sits at about half its unblurred value
+# and about a quarter of the active line's -- a visible shape whose words cannot be read. Lower it
+# and the lines fade out entirely; raise it and they become legible again. Note that at a high blur
+# radius it stops having much effect, because the blur has already spread the ink thin.
+# 1.0 disables it.
+LYRICS_COLOR_OPACITY = 1.0
+
+# Alpha for a lyric line that is not the active one, and how fast that falls off with distance from
+# it. Previously these were literals in the drawing loop -- 190 minus 55 per row, floored at 50 --
+# which left the third line out at 50, a fifth of the active line, before any blur.
+#
+# That was the real reason the other lines could not be seen under the colour visualiser: the blur
+# was blamed for it, but a line drawn at alpha 50 has almost nothing left to blur. Raised so the
+# nearest lines read clearly and the far ones stay legible; the fade is kept, because a column of
+# lines all at the same weight reads as a wall.
+# The faded step, used under the colour visualiser. Its own numbers rather than the ones above,
+# because they are different brightnesses doing different jobs: these lines are meant to be seen and
+# not read, while the ordinary ones are meant to be read. Measured, this pair leaves a non-active line
+# at about a fifth of the active line's contrast.
+# The fade itself is animated, 0 to 1, where 1 is fully faded and is where it rests. One number for
+# the whole panel, so every line moves together, and a spring rather than a ramp so the change has the
+# same weight as the rest of the panel's motion.
+# How much dimmer the unreached lines are under the colour visualiser with the fade switched off.
+# The panel is busy there, so the plain step reads as uniformly bright and the order is lost.
+LYRICS_COLOR_IDLE_SCALE = 0.72
+
+# How far beyond the words the hover region reaches, on every side. The air around the band is what
+# keeps the effect steady as the pointer crosses its edges.
+LYRICS_HOVER_PAD_PX = 8
+
+LYRICS_FADE_SPRING_OMEGA = 7.0
+LYRICS_FADE_SPRING_RATIO = 0.9
+LYRICS_FADE_SETTLE = 0.004
+
+LYRICS_FADE_ALPHA = 44
+LYRICS_FADE_ALPHA_STEP = 3
+LYRICS_FADE_ALPHA_MIN = 42
+LYRICS_IDLE_ALPHA = 215
+LYRICS_IDLE_ALPHA_STEP = 22
+LYRICS_IDLE_ALPHA_MIN = 150
+# Cache key for the blurred layer. Dropped whenever the text, the geometry or the layer's inputs
+# change, which is cheaper than hashing the rendered pixels.
+_LYRICS_BLUR_CACHE: dict = {}
+
 # The active line grows from the idle size to this one, driven by the same spring.
 LYRICS_FONT_SIZE_IDLE = 17
 LYRICS_FONT_SIZE_ACTIVE = 19
@@ -1552,6 +1614,8 @@ class ToyPage(QWidget):
 
     # Emitted when the lyric alignment changes (settings row -> this page).
     lyrics_align_changed = Signal(int)
+    lyrics_size_changed = Signal(int)
+    lyrics_fade_changed = Signal(bool)
 
     def __init__(self, parent: QWidget = None) -> None:
         super().__init__(parent)
@@ -1726,6 +1790,22 @@ class ToyPage(QWidget):
         self._lyrics_line_springs: dict[int, list[float]] = {}
         # Where the lines sit in their panel; the settings page changes it.
         self._lyrics_align = DEFAULT_LYRICS_ALIGN
+        # How large the lines are: an index into LYRICS_SIZES, which carries the font sizes and
+        # the edge margin together (see the note there).
+        self._lyrics_size = DEFAULT_LYRICS_SIZE
+        # Whether the non-active lines fade under the colour visualiser; the settings page
+        # toggles it. Held here rather than checked per paint so the drawing stays a pure read.
+        self._lyrics_fade = DEFAULT_LYRICS_FADE
+        # Which line the pointer is over, or -1.
+        self._lyrics_hover_index = -1
+        # How faded the panel is, 0 to 1: 1 is fully faded, which is where it rests, and 0 is the
+        # ordinary look. Animated rather than switched, because snapping between the two is abrupt.
+        self._lyrics_fade_value = 1.0
+        self._lyrics_fade_velocity = 0.0
+        # Whether the fade is currently being released by the pointer. Computed by
+        # _refresh_lyrics_fade, which the tick calls -- so it has to exist before the first paint,
+        # not be introduced by it.
+        self._lyrics_fade_lifted = False
         # Memoised lyric heights. The layout asks for every line's wrapped height
         # several times per frame (content height, scroll target, scroll range --
         # measured ~600 calls per 6 frames), and each measurement builds a fresh
@@ -1746,6 +1826,10 @@ class ToyPage(QWidget):
         self._lyrics_scroll_at_drag_start = 0.0
         self._lyrics_panel_rect = QRect()
         self._lyrics_hit_rects: list[tuple[QRect, int]] = []
+        # The same list, kept from the last completed paint. The live one is empty or partial
+        # while a paint is running -- it is cleared on entry and filled in two passes -- so it
+        # cannot be consulted mid-draw, which is exactly where the hover test needs it.
+        self._lyrics_row_rects: list[tuple[QRect, int]] = []
         # Right-click copies a lyric line; the copied line flashes instead of a
         # toast so nothing covers the words. Progress 1 -> 0, decayed in _tick.
         self._lyric_copy_flash_index = -1
@@ -2352,6 +2436,9 @@ class ToyPage(QWidget):
         self._song_artist = ""
         self._album = ""
         self._lyrics = []
+        # The hover points into the lyric list, which is being replaced: an index from the
+        # previous song would name a different line here.
+        self._lyrics_hover_index = -1
         self._lyric_height_cache.clear()
         self._track_info = {}
         self._info_scroll = {}
@@ -2803,6 +2890,45 @@ class ToyPage(QWidget):
                 break
         return idx
 
+    def _lyrics_size_spec(self) -> tuple[int, int, int]:
+        """The selected tier as (idle font size, active font size, edge margin)."""
+        index = max(0, min(len(LYRICS_SIZES) - 1, int(self._lyrics_size)))
+        return LYRICS_SIZES[index][1]
+
+    def set_lyrics_fade(self, enabled: bool, notify: bool = False) -> None:
+        """Fade the non-active lyric lines under the colour visualiser.
+
+        `notify` exists for the same reason as the other setters': restoring the saved value at
+        startup must not look like a user change.
+        """
+        enabled = bool(enabled)
+        if enabled == self._lyrics_fade:
+            return
+        self._lyrics_fade = enabled
+        self.update()
+        if notify:
+            self.lyrics_fade_changed.emit(enabled)
+
+    def lyrics_size(self) -> int:
+        """Index into `LYRICS_SIZES` of the current lyric size."""
+        return self._lyrics_size
+
+    def set_lyrics_size(self, index: int, notify: bool = False) -> None:
+        """Set how large the lyric lines are: 0 small, 1 medium, 2 large.
+
+        Heights are cached per alignment and width, so the cache is dropped when the size changes.
+        `notify` exists for the same reason as `set_lyrics_align`'s: restoring the saved value at
+        startup must not look like a user change.
+        """
+        index = max(0, min(len(LYRICS_SIZES) - 1, int(index)))
+        if index == self._lyrics_size:
+            return
+        self._lyrics_size = index
+        self._lyric_height_cache.clear()
+        self.update()
+        if notify:
+            self.lyrics_size_changed.emit(index)
+
     def _lyrics_align_flag(self) -> Qt.AlignmentFlag:
         """Qt alignment flag for the saved lyric position (left / centre / right)."""
         return (Qt.AlignLeft, Qt.AlignHCenter, Qt.AlignRight)[
@@ -2829,25 +2955,69 @@ class ToyPage(QWidget):
         if notify:
             self.lyrics_align_changed.emit(index)
 
-    def _lyric_entry_height(self, i: int, max_w: int, active: int) -> int:
-        """Return the wrapped height of a single lyric entry, memoised.
+    def _lyric_drawn_height(self, target: QPainter, i: int, line: str, max_w: int,
+                            text_flags) -> int:
+        """How tall *line* will be when it is drawn, font and all.
+    
+        Used by the layout walk and by the pass that draws a line sharp afterwards, so both
+        agree on the box. Measuring with a different font than the one that paints is what
+        made the active line come out small: its box was sized for the tier's idle font while
+        the text was drawn with the larger animated one and had to fit inside it.
+        """
+        font = ui_font(int(round(self._lyrics_line_font_size(i, i == self._current_lyric_index()))))
+        font.setWeight(QFont.Bold)
+        target.setFont(font)
+        return target.fontMetrics().boundingRect(QRect(0, 0, max_w, 0), text_flags, line).height()
 
-        Measured with the SAME alignment flag the line is drawn with: Qt wraps
-        differently per flag, and a height that disagrees with the drawing would
-        make the lines drift apart from the scroll offsets.
+    def _lyric_entry_width(self, i: int, max_w: int) -> int:
+        """Return the width the wrapped text of a lyric entry actually occupies.
+
+        Measured with the same font, alignment flag and wrapping as the height, so the two agree about
+        where the words are. Used for the hover region's left and right edges: a short line should not
+        count as reaching the full column.
+
+        Memoised on the same terms as the height, and measured for every line rather than only the
+        drawn ones -- a line left out of the blurred layer is never measured while drawing, and the
+        region would then be narrower than the words on the frames just after the release.
         """
         if max_w != self._lyric_height_width:
             self._lyric_height_width = max_w
             self._lyric_height_cache.clear()
         align = self._lyrics_align_flag()
-        key = (i, max_w, i == active, int(align))
+        idle_size, _active_size, _margin = self._lyrics_size_spec()
+        font = ui_font(idle_size)
+        font.setWeight(QFont.Bold)
+        br = QFontMetrics(font).boundingRect(
+            QRect(0, 0, max_w, 0),
+            Qt.TextWordWrap | align,
+            self._lyrics[i][1],
+        )
+        return br.width()
+
+    def _lyric_entry_height(self, i: int, max_w: int) -> int:
+        """Return the wrapped height of a single lyric entry, memoised.
+
+        Measured with the SAME alignment flag the line is drawn with: Qt wraps differently per
+        flag, and a height that disagrees with the drawing would make the lines drift apart
+        from the scroll offsets. Also measured with the same font -- the selected tier's idle
+        size -- for the same reason.
+        """
+        if max_w != self._lyric_height_width:
+            self._lyric_height_width = max_w
+            self._lyric_height_cache.clear()
+        align = self._lyrics_align_flag()
+        idle_size, _active_size, _margin = self._lyrics_size_spec()
+        key = (i, max_w, idle_size, int(align))
         cached = self._lyric_height_cache.get(key)
         if cached is not None:
             return cached
 
         _, line = self._lyrics[i]
-        is_active = i == active
-        font = ui_font(19 if is_active else 17)
+        # The tier's idle size, for every line. The drawing code uses the animated size for the
+        # active line alone, so measuring the lines above it at the active size -- which is what
+        # this did, hard-coded at 17/19 regardless of tier -- put the scroll target several lines
+        # away from where the text actually landed once the tier grew.
+        font = ui_font(idle_size)
         font.setWeight(QFont.Bold)
         fm = QFontMetrics(font)
         br = fm.boundingRect(
@@ -2858,11 +3028,11 @@ class ToyPage(QWidget):
         self._lyric_height_cache[key] = br.height()
         return br.height()
 
-    def _lyrics_content_height(self, max_w: int, active: int) -> float:
+    def _lyrics_content_height(self, max_w: int) -> float:
         """Total scrolled height of all lyric entries with gaps."""
         total = 0.0
         for i in range(len(self._lyrics)):
-            total += self._lyric_entry_height(i, max_w, active)
+            total += self._lyric_entry_height(i, max_w)
             if i < len(self._lyrics) - 1:
                 total += LYRICS_ENTRY_GAP
         return total
@@ -2872,18 +3042,18 @@ class ToyPage(QWidget):
         if active < 0 or not self._lyrics:
             return 0.0
 
+        _idle, _active, margin = self._lyrics_size_spec()
         panel_h = self.height()
-        avail_h = max(1, panel_h - 2 * LYRICS_EDGE_MARGIN)
-        # Pin the active line about one third down the visible area (second row).
-        # One row higher than it used to sit. Measured row pitch is ~58 px against ~640 px
-        # of available height, so 0.21 puts the active line exactly one row above the old
-        # position (top y=214 instead of 272).
-        desired_active_top = LYRICS_EDGE_MARGIN + avail_h * 0.21
+        avail_h = max(1, panel_h - 2 * margin)
+        # Pin the active line about a third of the way down the visible band, one row above where
+        # it used to sit. Both the margin and the line heights come from the selected size tier, so
+        # this stays one row up at every size instead of only at the size it was measured at.
+        desired_active_top = margin + avail_h * 0.21
 
         active_offset = 0.0
         for i in range(active):
             active_offset += (
-                self._lyric_entry_height(i, max_w, active) + LYRICS_ENTRY_GAP
+                self._lyric_entry_height(i, max_w) + LYRICS_ENTRY_GAP
             )
 
         base_y = 50  # must match _draw_lyrics
@@ -2897,9 +3067,10 @@ class ToyPage(QWidget):
         if n == 0:
             return (0.0, 0.0)
 
+        _idle, _active, margin = self._lyrics_size_spec()
         panel_h = self.height()
-        visible_top = LYRICS_EDGE_MARGIN
-        visible_bottom = panel_h - LYRICS_EDGE_MARGIN
+        visible_top = margin
+        visible_bottom = panel_h - margin
         base_y = 50
         has_timing = any(t >= 0 for t, _ in self._lyrics)
 
@@ -2909,9 +3080,9 @@ class ToyPage(QWidget):
         else:
             first_offset = last_offset = 0.0
 
-        total_h = self._lyrics_content_height(max_w, active)
-        first_h = self._lyric_entry_height(0, max_w, active)
-        last_h = self._lyric_entry_height(n - 1, max_w, active)
+        total_h = self._lyrics_content_height(max_w)
+        first_h = self._lyric_entry_height(0, max_w)
+        last_h = self._lyric_entry_height(n - 1, max_w)
 
         # Top-aligned: first line sits at the top edge.
         top_aligned = base_y - visible_top
@@ -3011,6 +3182,30 @@ class ToyPage(QWidget):
             value += velocity * step
         return value, velocity
 
+    def _update_lyrics_fade(self, dt_ms: float) -> None:
+        """Move the panel's fade towards its target, and repaint while it is moving.
+
+        Separate from the line springs because it is one value for the whole panel rather than a state
+        per line, but advanced by the same function so it settles the same way.
+        """
+        self._refresh_lyrics_fade()
+        # 1 at rest (fully faded), 0 while the pointer is releasing the effect.
+        target = 0.0 if self._lyrics_fade_lifted else 1.0
+        if (abs(self._lyrics_fade_value - target) < LYRICS_FADE_SETTLE
+                and abs(self._lyrics_fade_velocity) < LYRICS_FADE_SETTLE):
+            if self._lyrics_fade_value != target:
+                self._lyrics_fade_value = target
+                self._lyrics_fade_velocity = 0.0
+                self.update()
+            return
+        self._lyrics_fade_value, self._lyrics_fade_velocity = self._advance_spring(
+            self._lyrics_fade_value, self._lyrics_fade_velocity, target,
+            LYRICS_FADE_SPRING_OMEGA, LYRICS_FADE_SPRING_RATIO, dt_ms,
+        )
+        # The fade is applied while drawing the lines, so the painting has to happen again for the
+        # movement to be visible at all.
+        self.update()
+
     def _update_lyrics_line_springs(self, dt_ms: float) -> None:
         """Advance the list's scroll spring and every line still rippling."""
         if self._lyrics_dragging:
@@ -3105,14 +3300,14 @@ class ToyPage(QWidget):
 
     def _lyrics_line_font_size(self, index: int, is_active: bool) -> float:
         """Font size for one line, animated between the idle and active sizes.
-
         The active line used to switch between 17 and 19 with no transition, which is a visible
         jolt at the moment the line changes. The line's own displacement doubles as the blend
         here: the two sizes are the ends of its travel, so it grows on the way up and shrinks on
         the way back with no separate progress value to keep.
         """
+        idle_size, active_size, _margin = self._lyrics_size_spec()
         if LYRICS_LINE_LIFT_PX <= 0.0:
-            return LYRICS_FONT_SIZE_ACTIVE if is_active else LYRICS_FONT_SIZE_IDLE
+            return active_size if is_active else idle_size
         offset = self._lyrics_line_offset(index)
         if is_active and self._lyrics_anim_to == index:
             # offset runs LIFT -> 0 -> (overshoot below 0), so this runs 0 -> 1 -> past 1.
@@ -3121,8 +3316,8 @@ class ToyPage(QWidget):
             mix = 1.0 - max(0.0, min(1.0, -offset / LYRICS_LINE_PUSH_PX))
         else:
             mix = 0.0
-        return (LYRICS_FONT_SIZE_ACTIVE * mix
-                + LYRICS_FONT_SIZE_IDLE * (1.0 - mix))
+        return (active_size * mix
+                + idle_size * (1.0 - mix))
 
     def _start_lyrics_line_anim(self, previous: int, current: int) -> None:
         """Arm the motion a line change sets off.
@@ -3479,6 +3674,7 @@ class ToyPage(QWidget):
 
         # Advance the motion a line change starts. Timed from the frame delta so the springs
         # behave the same at any refresh rate.
+        self._update_lyrics_fade(dt_ms)
         self._update_lyrics_line_springs(dt_ms)
 
         # Marquee the title / artist+album lines when they overflow their column.
@@ -5328,6 +5524,27 @@ class ToyPage(QWidget):
                     60 * 16,
                 )
 
+    def _blurred_layer(self, image: QImage, key: tuple) -> QImage:
+        """A blurred copy of *image*, memoised on *key*.
+
+        Shrink and grow: Qt cannot blur a pixmap directly, and at these sizes the interpolation
+        does the job convincingly. The cache matters because the layer is only rebuilt when its
+        key changes -- during playback the scroll moves every frame, so the key includes it.
+        """
+        cached = _LYRICS_BLUR_CACHE.get("key")
+        if cached == key and _LYRICS_BLUR_CACHE.get("image") is not None:
+            return _LYRICS_BLUR_CACHE["image"]
+
+        small = image.scaled(
+            max(1, int(image.width() / LYRICS_BLUR_SHRINK)),
+            max(1, int(image.height() / LYRICS_BLUR_SHRINK)),
+            Qt.IgnoreAspectRatio, Qt.SmoothTransformation,
+        )
+        blurred = small.scaled(image.size(), Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        _LYRICS_BLUR_CACHE["key"] = key
+        _LYRICS_BLUR_CACHE["image"] = blurred
+        return blurred
+
     def _draw_lyrics(self, painter: QPainter, rect: QRect) -> None:
         if not self._lyrics:
             return
@@ -5337,7 +5554,8 @@ class ToyPage(QWidget):
 
         # Keep lyrics away from the panel edges.
         h_margin = 30
-        v_margin = LYRICS_EDGE_MARGIN
+        _idle, _active, margin = self._lyrics_size_spec()
+        v_margin = margin
         fade_zone = 70
         x = rect.left() + h_margin
         base_y = rect.top() + 50
@@ -5350,69 +5568,347 @@ class ToyPage(QWidget):
         has_timing = any(t >= 0 for t, _ in self._lyrics)
         active = self._current_lyric_index() if has_timing else -1
 
-        for i, (t, line) in enumerate(self._lyrics):
-            if y > rect.bottom():
-                break
+        # Whether the other lines recede, decided once for the whole panel.
+        #
+        # Pointing at a line that is not the one being sung lifts the fade entirely, so the panel
+        # reads as if the setting were switched off. Pointing at the active line changes nothing --
+        # it is already at full strength, and there is nothing to release.
+        #
+        # One decision for all lines rather than an exception per line: the earlier per-line version
+        # had to keep the hovered line out of the blurred layer, put it back sharp, and work out where
+        # it went, and each of those steps was a chance to draw it twice or in the wrong place.
+        # Where the active line sits, captured during the layer pass. That pass walks the whole
+        # layout even for the lines it leaves out -- the cursor advances by the measured height either
+        # way -- so it is the one place the position is known. It used to be recorded implicitly, as a
+        # side effect of the line being drawn into the layer; once it stopped being drawn there, the
+        # sharp pass had nothing to look up and silently drew nothing at all.
+        active_rect = None
+        active_draw_y = None
 
-            is_active = i == active
-            font = ui_font(int(round(self._lyrics_line_font_size(i, is_active))))
-            font.setWeight(QFont.Bold)
-            painter.setFont(font)
+        # Everything below is a closure over `target` so the same code can draw to the widget or
+        # to an offscreen layer, depending on whether the lines are being blurred.
+        def draw_lines(target: QPainter, skip=(), only: int = -1) -> None:
+            """Draw the visible lines onto *target*.
 
-            fm = painter.fontMetrics()
-            br = fm.boundingRect(QRect(0, 0, max_w, 0), text_flags, line)
-            block_h = br.height()
+            A closure over the geometry computed above so the same code can serve the widget's
+            painter or the offscreen layer used for the blur, rather than duplicating the layout.
 
-            # Skip entries entirely above the panel.
-            # The line's own ripple, over the list's scroll. Held apart from `y` so the
-            # layout walk stays on the rig -- folding it into `y` would shift every line
-            # after this one by the same amount.
-            draw_y = y + self._lyrics_line_offset(i)
+            `skip` leaves lines out -- the layer uses it to exclude the ones that will be drawn
+            sharp on top, because cutting them back out with a clip leaves a visible hard edge around
+            them once the blur is strong. `only` draws a single line, which is how those are put back.
+            """
+            nonlocal y, active_rect, active_draw_y
+            # `skip` is a collection of indices, not one index. It was declared as a single int and
+            # then handed a list, and `i == skip` was False for every line as a result -- the layer
+            # drew everything, including the line it was supposed to leave out, and that line came
+            # down a second time in a slightly different place. An int is still accepted here so a
+            # single-index call cannot fail the same silent way.
+            skipped = {skip} if isinstance(skip, int) else set(skip)
+            # Reset on entry: the caller may run this more than once per paint (the blur path
+            # draws the layer, then the active line again on top), and a cursor left at the end
+            # of the list would draw nothing the second time.
+            y = base_y - self._lyrics_scroll_offset
+            for i, (t, line) in enumerate(self._lyrics):
+                if y > rect.bottom():
+                    break
 
-            if y + block_h <= rect.top():
+                # Two filters, and "only" wins: a call that names one line draws that line and
+                # nothing else. Combining them with `or` let `skip` take precedence, so the call
+                # meant to redraw the active line skipped it a second time -- which is why it never
+                # appeared under the colour visualiser, and why it was not clickable there either.
+                if only >= 0:
+                    if i != only:
+                        y += self._lyric_entry_height(i, max_w) + LYRICS_ENTRY_GAP
+                        continue
+                    # Drawn at the position the layer pass gave this line, straight to the widget.
+                    # Walking the layout again would land it a few pixels high: heights are measured
+                    # with the tier's idle font while the active line is drawn with its animated one,
+                    # which is taller, so the cursor advances less than the drawing did. Reusing the
+                    # recorded rect also makes the painted line and its clickable area the same
+                    # rectangle, which is what hover and click resolve against.
+                    target.setPen(QColor(255, 255, 255, 255))
+                    if i == active and active_draw_y is not None:
+                        draw_y = active_draw_y
+                    elif i == active and active_rect is not None:
+                        draw_y = float(active_rect.top())
+                    else:
+                        recorded = next((r for r, index in self._lyrics_hit_rects if index == i),
+                                        None)
+                        if recorded is None:
+                            return
+                        draw_y = float(recorded.top())
+                    # Measured here rather than taken from the recorded rect: the rect carries the
+                    # height the layout walk used, and for the active line that is the idle font's
+                    # height, smaller than the text. The helper sets the font too, so the box and the
+                    # glyphs come from the same one.
+                    block_h = self._lyric_drawn_height(target, i, line, max_w, text_flags)
+                    target.drawText(QRectF(x, draw_y, max_w, block_h), text_flags, line)
+                    self._lyrics_hit_rects.append((QRect(x, int(draw_y), max_w, int(block_h)), i))
+                    return
+                if i in skipped:
+                    # Measured with the font the drawing path will use rather than the tier's idle
+                    # font: an active line is drawn larger than the rig assumes, and a box measured
+                    # short squeezes the text into it.
+                    block_h = self._lyric_drawn_height(target, i, line, max_w, text_flags)
+                    if i == active:
+                        # The fractional y, not the rounded one: the blurred path draws this line at
+                        # the layout position, so the sharp path has to use the same number or the
+                        # text sits a pixel lower the moment the blur is released. The rectangle
+                        # keeps its own rounding, since it is compared against mouse positions.
+                        active_draw_y = float(y)
+                        active_rect = QRect(x, int(y), max_w, int(block_h))
+                    y += block_h + LYRICS_ENTRY_GAP
+                    continue
+
+                is_active = i == active
+                # Sets the font as well as measuring: the box and the text have to come from the same
+                # font, or the text is fitted into a box that was sized for a different one.
+                block_h = self._lyric_drawn_height(target, i, line, max_w, text_flags)
+
+                # The line's own ripple, over the list's scroll. Held apart from `y` so the
+                # layout walk stays on the rig -- folding it into `y` would shift every line
+                # after this one by the same amount.
+                draw_y = y + self._lyrics_line_offset(i)
+
+                if y + block_h <= rect.top():
+                    y += block_h + LYRICS_ENTRY_GAP
+                    continue
+
+                # Distance-based fade around the active line.
+                dist = abs(i - active) if active >= 0 else 0
+                if is_active:
+                    base_alpha = 255
+                elif not faded:
+                    # Either the effect is off, or the pointer is releasing it. Both draw at the
+                    # ordinary strength, and neither singles out the line under the pointer: the
+                    # release is for the whole panel, so no line looks selected.
+                    # The fade is not in effect -- another visualiser, or the setting switched off --
+                    # so the ordinary strength is used outright. Blending here let the spring's
+                    # resting position decide the panel's look even though nothing was being faded,
+                    # and at rest that position is the faded end, so the faded alphas were computed
+                    # for a panel that never showed them.
+                    base_alpha = max(
+                        LYRICS_IDLE_ALPHA_MIN,
+                        LYRICS_IDLE_ALPHA - dist * LYRICS_IDLE_ALPHA_STEP,
+                    )
+                    if self._visualizer == _VISUALIZER_COLORS:
+                        base_alpha = int(round(base_alpha * LYRICS_COLOR_IDLE_SCALE))
+                else:
+                    # Two strengths for a line that is not being sung, and the fade's spring moves
+                    # between them: at 1 it is the faded look, at 0 the ordinary one. The transition
+                    # animates in both directions, including when the pointer releases the effect.
+                    faded_alpha = max(
+                        LYRICS_FADE_ALPHA_MIN,
+                        LYRICS_FADE_ALPHA - dist * LYRICS_FADE_ALPHA_STEP,
+                    )
+                    ordinary_alpha = max(
+                        LYRICS_IDLE_ALPHA_MIN,
+                        LYRICS_IDLE_ALPHA - dist * LYRICS_IDLE_ALPHA_STEP,
+                    )
+                    # 1 is fully faded and 0 is the ordinary look -- the value is at 1 when the
+                    # panel is at rest, and at rest the effect is on.
+                    blend = min(1.0, max(0.0, self._lyrics_fade_value))
+                    base_alpha = int(round(ordinary_alpha + (faded_alpha - ordinary_alpha) * blend))
+
+                # Edge fade so lyrics are not cut off hard against the top and bottom.
+                center_y = draw_y + block_h / 2
+                if center_y < visible_top:
+                    edge_factor = max(0.0, 1.0 - (visible_top - center_y) / fade_zone)
+                elif center_y > visible_bottom:
+                    edge_factor = max(0.0, 1.0 - (center_y - visible_bottom) / fade_zone)
+                else:
+                    edge_factor = 1.0
+
+                alpha = int(base_alpha * edge_factor)
+                arrival = self._lyrics_arrival_alpha(i)
+                if arrival < 1.0:
+                    alpha = int(alpha * arrival)
+                if alpha > 0:
+                    # The just-copied line flashes: its glyphs brighten toward solid white.
+                    # Nothing is painted behind them -- no block, no halo. A blurred halo was
+                    # tried and removed: measured at dpr 2 it changed the frame by 0 pixels
+                    # (the glyph brightening already dominates) while costing work and, before
+                    # it was clipped, leaking a visible sliver of light outside the line's box.
+                    if i == self._lyric_copy_flash_index and self._lyric_copy_flash > 0.0:
+                        flash = self._lyric_copy_flash * edge_factor
+                        alpha = int(alpha + (255 - alpha) * flash * LYRICS_COPY_FLASH_PEAK)
+                    target.setPen(QColor(255, 255, 255, alpha))
+                    # Drawn from a fractional y on purpose. Rounding to whole pixels makes the
+                    # slow tail of a spring jump 0 or 2 px per frame instead of 1, which reads
+                    # as stutter even though the frame rate is fine.
+                    target.drawText(QRectF(x, draw_y, max_w, block_h), text_flags, line)
+                    # The clickable area stays on whole pixels: it is compared against mouse
+                    # positions, and a fractional rect there buys nothing.
+                    self._lyrics_hit_rects.append((QRect(x, int(draw_y), max_w, block_h), i))
+
                 y += block_h + LYRICS_ENTRY_GAP
-                continue
 
-            # Distance-based fade around the active line.
-            dist = abs(i - active) if active >= 0 else 0
-            base_alpha = 255 if is_active else max(50, 190 - dist * 55)
+        # By row, not by rectangle: the pointer only has to be level with a line, at any x. Tested per
+        # rectangle it also had to be over the glyphs, so crossing a gap between two words -- or the
+        # empty end of a short line -- dropped the hover and the fade came back mid-sweep.
+        #
+        # Taken here, after the walk, because the row test reads the rect list that this method clears
+        # on entry and fills as it draws. Deciding it before the walk read an empty list and always
+        # said no, while the tick -- reading the previous frame's list -- often said yes, and the two
+        # overwrote each other every frame.
+        # Judged against the rows the last completed frame recorded. The list being built below is
+        # cleared on entry and filled in two passes, so it is empty or partial until the very end --
+        # reading it here answered "nothing hovered" every time.
+        self._lyrics_fade_lifted = self._lyrics_row_hovered(active)
 
-            # Edge fade so lyrics don't sit hard against the top/bottom.
-            center_y = draw_y + block_h / 2
-            if center_y < visible_top:
-                edge_factor = max(0.0, 1.0 - (visible_top - center_y) / fade_zone)
-            elif center_y > visible_bottom:
-                edge_factor = max(0.0, 1.0 - (center_y - visible_bottom) / fade_zone)
-            else:
-                edge_factor = 1.0
+        # Whether the panel is drawn through the blurred layer: the setting on, the colour visualiser,
+        # and the pointer not releasing the effect. Dropping the blur is what makes the text sharp --
+        # raising the alpha inside that layer only draws brighter blurred text.
+        faded = (
+            self._lyrics_fade
+            and self._visualizer == _VISUALIZER_COLORS
+            and not self._lyrics_fade_lifted
+        )
+        if not faded:
+            draw_lines(painter)
+            # Straight to the widget, but the rows are still the rows.
+            self._lyrics_row_rects = list(self._lyrics_hit_rects)
+            return
 
-            alpha = int(base_alpha * edge_factor)
-            arrival = self._lyrics_arrival_alpha(i)
-            if arrival < 1.0:
-                alpha = int(alpha * arrival)
-            if alpha > 0:
-                # The just-copied line flashes: its glyphs brighten toward solid
-                # white. Nothing is painted behind them -- no block, no halo.
-                # A blurred halo was tried and removed: measured at dpr 2 it
-                # changed the frame by 0 pixels (the glyph brightening already
-                # dominates) while costing work and, before it was clipped,
-                # leaking a visible sliver of light outside the line's box.
-                if i == self._lyric_copy_flash_index and self._lyric_copy_flash > 0.0:
-                    flash = self._lyric_copy_flash * edge_factor
-                    alpha = int(alpha + (255 - alpha) * flash * LYRICS_COPY_FLASH_PEAK)
-                painter.setPen(QColor(255, 255, 255, alpha))
-                # Drawn from a fractional y on purpose. Rounding to whole pixels makes the
-                # slow tail of a spring jump 0 or 2 px per frame instead of 1, which reads
-                # as stutter even though the frame rate is fine; Qt places text on
-                # fractional coordinates and at this machine's scale that is the smoother
-                # of the two.
-                painter.drawText(QRectF(x, draw_y, max_w, block_h), text_flags, line)
-                # Clickable even if faded near the edges.
-                # The clickable area stays on whole pixels: it is compared against mouse
-                # positions, and a fractional rect there buys nothing.
-                self._lyrics_hit_rects.append((QRect(x, int(draw_y), max_w, block_h), i))
+        # The lines drawn sharp rather than blurred. There is now only ever one: the line being sung.
+        # It is drawn after the layer, so it must be left out of the layer -- an alpha of 255 buys
+        # nothing inside a blurred copy, which softens whatever it is given. Drawing it in both places
+        # is what produced a second, slightly offset copy of the words.
+        sharp = [active] if active >= 0 else []
 
-            y += block_h + LYRICS_ENTRY_GAP
+        # Colour visualiser: the panel is busy, so everything except the line being sung recedes
+        # into it. The layer is only rebuilt when its inputs change.
+        # Rasterised at PHYSICAL resolution, with no ratio of its own.
+        #
+        # The distinction matters and is easy to get wrong in either direction. Declaring a ratio on
+        # a layer the size of the panel in logical pixels makes Qt rasterise the text at half the
+        # resolution it is displayed at and then enlarge it, which shows up as grain -- the panel
+        # looks like a magnified low-resolution image. Allocating at the device size and painting in
+        # device pixels instead puts one image pixel behind each screen pixel.
+        #
+        # The painter is scaled so the drawing code can keep using logical units; the scale here is
+        # the only one, so nothing is applied twice.
+        ratio = painter.device().devicePixelRatioF() if painter.device() is not None else 1.0
+        if ratio <= 0:
+            ratio = 1.0
+        layer = QImage(int(rect.width() * ratio), int(rect.height() * ratio),
+                       QImage.Format_ARGB32_Premultiplied)
+        layer.fill(Qt.transparent)
+        layer_painter = QPainter(layer)
+        try:
+            layer_painter.setRenderHint(QPainter.Antialiasing)
+            layer_painter.setRenderHint(QPainter.TextAntialiasing)
+            layer_painter.scale(ratio, ratio)
+            # The lines are drawn in widget coordinates, so the painter is moved to the panel's
+            # origin as well -- without it the panel, which sits at x=600 in a 1200-wide window,
+            # would have every line drawn outside a canvas only as wide as the panel.
+            layer_painter.translate(-rect.left(), -rect.top())
+            draw_lines(layer_painter, skip=sharp)
+        finally:
+            # Always closed. A QPainter left open aborts the process with no Python traceback,
+            # so this must not depend on everything above it succeeding.
+            layer_painter.end()
+
+        if LYRICS_COLOR_OPACITY < 1.0:
+            # Applied to the layer rather than per line: everything in it is non-active by
+            # construction, so one pass over the whole thing is the same result for less code.
+            #
+            # Its own painter, without the translation above. Filling inside that translated system
+            # would put the rectangle at the panel's offset instead of over the layer, so the
+            # dimming would silently do nothing whenever the panel is not at the origin.
+            dim = QPainter(layer)
+            try:
+                dim.setCompositionMode(QPainter.CompositionMode_DestinationIn)
+                dim.fillRect(layer.rect(), QColor(0, 0, 0, int(255 * LYRICS_COLOR_OPACITY)))
+            finally:
+                dim.end()
+
+        key = (rect.width(), rect.height(), round(self._lyrics_scroll_offset, 2),
+               active, self._lyrics_size, self._lyrics_align,
+               round(self._lyric_copy_flash, 3), self._lyric_copy_flash_index,
+               # Part of the layer's content: every line's alpha is blended by it, so a key without
+               # it reuses the previous layer for the whole animation and the picture never moves.
+               round(self._lyrics_fade_value, 3))
+        blurred = self._blurred_layer(layer, key)
+
+        # The layer never contained the active line, so it goes down whole. Then the active line is
+        # drawn sharp on top -- and only it. Calling draw_lines for the whole list here would paint
+        # every blurred line sharp again and undo the effect.
+        # Drawn scaled down from device pixels to the panel's logical rectangle.
+        painter.drawImage(QRectF(rect), blurred, QRectF(blurred.rect()))
+        # No saving and restoring of the rect list: it was cleared at the top of this method and the
+        # layer pass has recorded every line except the sharp ones, so drawing those completes it.
+        # An earlier attempt saved a copy and restored it afterwards, which depended on what the list
+        # happened to hold on entry and made hover and click resolve the wrong line.
+        for index in sharp:
+            draw_lines(painter, only=index)
+
+        # The rows as drawn, kept for the hover test to read on the next frame. Both passes have run,
+        # so the list is complete here and nowhere earlier.
+        self._lyrics_row_rects = list(self._lyrics_hit_rects)
+
+    def _refresh_lyrics_fade(self) -> None:
+        """Recompute whether the pointer is releasing the fade.
+
+        Called from the tick and from the draw. Both need it and they must not disagree: the spring
+        travels towards what the tick decided, while the drawing blends by the same flag.
+
+        The fade has to be in effect before there is anything to release, so the setting and the
+        visualiser are part of the condition. Without them the spring moved on hover even with the
+        effect switched off -- towards the faded end, which is the opposite of what the panel was
+        showing, and it left the value parked where the drawing did not expect it.
+        """
+        in_effect = self._lyrics_fade and self._visualizer == _VISUALIZER_COLORS
+        active = self._current_lyric_index() if any(t >= 0 for t, _ in self._lyrics) else -1
+        self._lyrics_fade_lifted = in_effect and self._lyrics_row_hovered(active)
+
+    def _lyrics_region_contains(self, x: float, y: float, active: int) -> bool:
+        """Whether the pointer is over the lyrics that have not been sung yet.
+
+        A rectangle, not a band: the height covers the lines still ahead -- from just above the one
+        that comes next to just below the last on screen -- and the width covers the words, from just
+        before where they start to just after the widest of them ends. Between the lines counts, and
+        so does anything within a line's own width; off to either side of the words does not, which is
+        what keeps the effect from triggering out over the artwork.
+
+        With nothing still to come there is no region: there are no words left to point at.
+        """
+        upcoming = [(rect, index) for rect, index in self._lyrics_row_rects if index > active]
+        if not upcoming:
+            return False
+        left = min(rect.left() for rect, _ in upcoming) - LYRICS_HOVER_PAD_PX
+        top = min(rect.top() for rect, _ in upcoming) - LYRICS_HOVER_PAD_PX
+        bottom = max(rect.bottom() for rect, _ in upcoming) + LYRICS_HOVER_PAD_PX
+        # The widest line is what the column reaches to. Measuring per line and taking the maximum
+        # keeps short lines from widening it, which is what using the column's own width would do.
+        right = max(
+            rect.left() + self._lyric_entry_width(index, rect.width())
+            for rect, index in upcoming
+        ) + LYRICS_HOVER_PAD_PX
+        return left <= x <= right and top <= y <= bottom
+
+    def _lyrics_index_near(self, y: float, active: int) -> int:
+        """Some line still to come that the pointer is level with, for "is it over the region at all".
+
+        Any of them will do -- the effect is panel-wide, and this only has to distinguish being over
+        the region from being off it. The exact rectangles cannot answer that, because a point in a
+        gap between two lines belongs to none of them.
+        """
+        for rect, index in self._lyrics_row_rects:
+            if index > active and rect.top() <= y <= rect.bottom():
+                return index
+        return -1
+
+    def _lyrics_row_hovered(self, active: int) -> bool:
+        """Whether the pointer is over the lyrics other than the one being sung.
+
+        No guard on the index beyond the pointer being on the lyrics at all: it is -2 when the pointer
+        sits in a gap inside the region, which is deliberately part of the region. Rejecting negatives
+        here threw those points away one line after the region had accepted them.
+        """
+        if self._lyrics_hover_index == -1:
+            return False
+        return self._lyrics_region_contains(self._mouse.x(), self._mouse.y(), active)
 
     def _lyric_index_at(self, pos: QPoint) -> int:
         """Index of the lyric line under *pos*, or -1.
@@ -5592,6 +6088,23 @@ class ToyPage(QWidget):
             and self._progress_bar_rect.contains(pos)
         )
 
+        # Which lyric line the pointer is over. The region decides whether it is over the lyrics at
+        # all -- the gaps between lines count -- and the index is only used to tell "off the lyrics"
+        # from "on them", so any line in the region will do. Resolving it by exact rectangle left the
+        # index at -1 in every gap, which cancelled the hover entirely.
+        #
+        # Only repaint when it actually changes, since this runs on every move.
+        active_now = self._current_lyric_index() if self._lyrics else -1
+        if self._lyrics and self._lyrics_region_contains(pos.x(), pos.y(), active_now):
+            hovered = self._lyrics_index_near(pos.y(), active_now)
+            if hovered < 0:
+                hovered = -2      # in the region but between lines: still "over the lyrics"
+        else:
+            hovered = -1
+        if hovered != self._lyrics_hover_index:
+            self._lyrics_hover_index = hovered
+            self.update()
+
         if self._vinyl_pull_origin is not None and not self._vinyl_pull_active:
             # Waiting to see whether this is a hand pull or just a click.
             dx = pos.x() - self._vinyl_pull_origin.x()
@@ -5770,6 +6283,11 @@ class ToyPage(QWidget):
         """End an active scratch if the cursor leaves the widget."""
         if self._vinyl_dragging:
             self._end_scratch()
+        # Drop the hovered lyric too. Without this the last line pointed at would stay at full
+        # strength after the cursor has gone, which reads as a stuck highlight.
+        if self._lyrics_hover_index != -1:
+            self._lyrics_hover_index = -1
+            self.update()
         super().leaveEvent(event)
 
     def wheelEvent(self, event) -> None:  # noqa: N802

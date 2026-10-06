@@ -125,7 +125,13 @@ from .constants import (
 from .dashboard import SystemDashboard
 from .page_stack import PageStack, Sidebar
 from .theme import ThemeAnimator, rgba, theme_for_page
-from .settings_page import SettingsPage, read_frosted_level, read_lyrics_align
+from .settings_page import (
+    SettingsPage,
+    read_frosted_level,
+    read_lyrics_align,
+    read_lyrics_fade,
+    read_lyrics_size,
+)
 from .settings_store import settings
 from .toy_page import ToyPage
 
@@ -1841,6 +1847,12 @@ class AfterFrameWindow(QWidget):
         self._settings_page.lyrics_align_changed.connect(
             self._on_lyrics_align_changed
         )
+        self._settings_page.lyrics_size_changed.connect(
+            self._on_lyrics_size_changed
+        )
+        self._settings_page.lyrics_fade_changed.connect(
+            self._on_lyrics_fade_changed
+        )
         # The music page has its own folder picker. Persist what it picks and
         # mirror it into the settings page, otherwise the two pages disagree:
         # the folder is loaded on one page while the other still shows -- and
@@ -1861,6 +1873,8 @@ class AfterFrameWindow(QWidget):
         # Where the lyrics sit: restored before the first paint, without looking
         # like a user change (see ToyPage.set_lyrics_align).
         self._toy_page.set_lyrics_align(read_lyrics_align())
+        self._toy_page.set_lyrics_size(read_lyrics_size())
+        self._toy_page.set_lyrics_fade(read_lyrics_fade())
         # Restore the saved visualisation before the first paint; an unknown or
         # missing key falls back to the default inside set_visualizer.
         self._toy_page.set_visualizer(
@@ -1912,6 +1926,16 @@ class AfterFrameWindow(QWidget):
         """Settings switch: the popup menus' hover labels, on or off."""
         if self._toy_page is not None:
             self._toy_page.set_row_tooltips(enabled)
+
+    def _on_lyrics_fade_changed(self, enabled: bool) -> None:
+        """Settings checkbox: whether the non-active lyric lines fade."""
+        if self._toy_page is not None:
+            self._toy_page.set_lyrics_fade(enabled)
+
+    def _on_lyrics_size_changed(self, index: int) -> None:
+        """Settings slider: how large the lyric lines are."""
+        if self._toy_page is not None:
+            self._toy_page.set_lyrics_size(index)
 
     def _on_lyrics_align_changed(self, index: int) -> None:
         """Settings slider: where the lyric lines sit."""

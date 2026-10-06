@@ -24,14 +24,19 @@ from .constants import (
     APP_NAME,
     APP_VERSION,
     DEFAULT_FROSTED_LEVEL,
+    DEFAULT_LYRICS_FADE,
+    DEFAULT_LYRICS_SIZE,
     DEFAULT_LYRICS_ALIGN,
     FROSTED_LEVELS,
     HEADING_WEIGHT,
     LYRICS_ALIGNMENTS,
+    LYRICS_SIZES,
     SETTINGS_KEY_FROSTED_CHROME,
     SETTINGS_KEY_FROSTED_LEVEL,
     SETTINGS_KEY_HOVER_LABELS,
     SETTINGS_KEY_LYRICS_ALIGN,
+    SETTINGS_KEY_LYRICS_FADE,
+    SETTINGS_KEY_LYRICS_SIZE,
     SETTINGS_KEY_MUSIC_DIR,
     SETTINGS_KEY_PCM_ENGINE,
     SETTINGS_KEY_WIPE,
@@ -103,6 +108,26 @@ def read_lyrics_align() -> int:
         settings_store(), SETTINGS_KEY_LYRICS_ALIGN, DEFAULT_LYRICS_ALIGN,
         0, len(LYRICS_ALIGNMENTS) - 1,
     )
+
+
+def read_lyrics_size() -> int:
+    """Saved lyric size index into LYRICS_SIZES (0 small, 1 medium, 2 large), clamped.
+
+    Read by the window as well: the music page needs it at startup, before the settings page
+    exists.
+    """
+    return _read_int(
+        settings_store(), SETTINGS_KEY_LYRICS_SIZE, DEFAULT_LYRICS_SIZE,
+        0, len(LYRICS_SIZES) - 1,
+    )
+
+
+def read_lyrics_fade() -> bool:
+    """Whether the non-active lyric lines fade under the colour visualiser.
+
+    Read by the window as well: the music page needs it at startup, before the settings page exists.
+    """
+    return _read_bool(settings_store(), SETTINGS_KEY_LYRICS_FADE, DEFAULT_LYRICS_FADE)
 
 
 def read_frosted_level() -> int:
@@ -498,6 +523,9 @@ class SettingsPage(QWidget):
     frosted_level_changed = Signal(int)
     # Emitted when the popup panels' hover labels are switched on/off.
     hover_labels_changed = Signal(bool)
+    # Emitted when the lyric size changes, as an index into LYRICS_SIZES
+    lyrics_size_changed = Signal(int)
+    lyrics_fade_changed = Signal(bool)
     # Emitted when the lyric alignment changes, as an index into LYRICS_ALIGNMENTS
     # (0 left, 1 centre, 2 right).
     lyrics_align_changed = Signal(int)
@@ -526,6 +554,8 @@ class SettingsPage(QWidget):
         rows.addWidget(self._build_wipe_row())
         rows.addWidget(self._build_frosted_chrome_row())
         rows.addWidget(self._build_lyrics_align_row())
+        rows.addWidget(self._build_lyrics_size_row())
+        rows.addWidget(self._build_lyrics_fade_row())
         rows.addWidget(self._build_hover_labels_row())
         rows.addWidget(self._build_about_row())
         rows.addStretch(1)
@@ -657,6 +687,34 @@ class SettingsPage(QWidget):
             "歌词位置",
             "在此设置音乐播放页面歌词的对齐方式",
             self._lyrics_align_slider,
+        )
+
+    def _build_lyrics_size_row(self) -> _SettingRow:
+        self._lyrics_size_slider = _LevelBar(
+            [label for label, _spec in LYRICS_SIZES],
+            _read_int(self._settings, SETTINGS_KEY_LYRICS_SIZE, DEFAULT_LYRICS_SIZE),
+        )
+        self._lyrics_size_slider.level_changed.connect(self._on_lyrics_size_changed)
+        return _SettingRow(
+            "歌词大小",
+            "在此设置音乐播放页面歌词的字号，以及一屏显示几句",
+            self._lyrics_size_slider,
+        )
+
+    def _build_lyrics_fade_row(self) -> _SettingRow:
+        self._lyrics_fade_check = QCheckBox("启用")
+        self._lyrics_fade_check.setCursor(Qt.PointingHandCursor)
+        self._lyrics_fade_check.setFocusPolicy(Qt.NoFocus)
+        self._lyrics_fade_check.setFont(_small_font(SETTINGS_BUTTON_PT))
+        self._lyrics_fade_check.setStyleSheet(self._checkbox_style())
+        self._lyrics_fade_check.setChecked(
+            _read_bool(self._settings, SETTINGS_KEY_LYRICS_FADE, DEFAULT_LYRICS_FADE)
+        )
+        self._lyrics_fade_check.toggled.connect(self._on_lyrics_fade_toggled)
+        return _SettingRow(
+            "歌词淡出",
+            "可视化效果为音乐色彩时，非当前歌词淡出，只留形状；鼠标指向某句可临时恢复清晰",
+            self._lyrics_fade_check,
         )
 
     def _build_hover_labels_row(self) -> _SettingRow:
@@ -846,6 +904,14 @@ class SettingsPage(QWidget):
     def _on_hover_labels_toggled(self, checked: bool) -> None:
         self._settings.setValue(SETTINGS_KEY_HOVER_LABELS, bool(checked))
         self.hover_labels_changed.emit(bool(checked))
+
+    def _on_lyrics_fade_toggled(self, checked: bool) -> None:
+        self._settings.setValue(SETTINGS_KEY_LYRICS_FADE, bool(checked))
+        self.lyrics_fade_changed.emit(bool(checked))
+
+    def _on_lyrics_size_changed(self, level: int) -> None:
+        self._settings.setValue(SETTINGS_KEY_LYRICS_SIZE, int(level))
+        self.lyrics_size_changed.emit(int(level))
 
     def _on_lyrics_align_changed(self, level: int) -> None:
         self._settings.setValue(SETTINGS_KEY_LYRICS_ALIGN, int(level))

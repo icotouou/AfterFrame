@@ -580,6 +580,8 @@ SETTINGS_KEY_FROSTED_CHROME = "frosted_chrome"
 SETTINGS_KEY_FROSTED_LEVEL = "frosted_level"
 SETTINGS_KEY_HOVER_LABELS = "hover_labels"
 SETTINGS_KEY_LYRICS_ALIGN = "lyrics_align"
+SETTINGS_KEY_LYRICS_SIZE = "lyrics_size"
+SETTINGS_KEY_LYRICS_FADE = "lyrics_fade"
 SETTINGS_KEY_MUSIC_DIR = "music_dir"
 SETTINGS_KEY_PCM_ENGINE = "pcm_engine"
 SETTINGS_KEY_VISUALIZER = "visualizer"
@@ -590,6 +592,29 @@ SETTINGS_KEY_WIPE = "wipe_transition"
 # bar shows, the index is what gets persisted.
 LYRICS_ALIGNMENTS = ("靠左", "居中", "靠右")
 DEFAULT_LYRICS_ALIGN = 1
+
+# Lyric size, as (idle font size, active font size, edge margin).
+#
+# The margin belongs to the size rather than being a separate setting: how many lines are visible
+# depends on the line height and on the space reserved at the panel edges in equal measure, so
+# changing the font alone would leave a "large" setting that still shows the same few lines.
+#
+# 大 is built to fill the panel with five complete lines and half a line above and below: five
+# lines plus the half at each edge is a pitch of usable/6, so the font size follows from the
+# panel rather than being picked. Measured at a 460 px panel: 17 pt wraps to a 34 px line and
+# 25 pt to 48 px, giving pitches of 58 and 72 px with the 24 px gap -- five lines at 大.
+# The values were 17/19/21 at first, which at 24% larger barely changed the line count.
+# 小 is unchanged: the same sizes and the same 80 px margin it has always had.
+LYRICS_SIZES = (
+    ("小", (17, 19, 80)),
+    ("中", (21, 23, 74)),
+    ("大", (25, 27, 20)),
+)
+DEFAULT_LYRICS_SIZE = 0
+
+# Whether the non-active lyric lines fade back under the colour visualiser. A switch rather than a
+# level: the effect is either there or not, and the degree of it is the alpha constants in the page.
+DEFAULT_LYRICS_FADE = True
 
 # Startup reveal: the window grows while staying grey, then a coloured band
 # sweeps left to right and the real UI appears in its wake.
