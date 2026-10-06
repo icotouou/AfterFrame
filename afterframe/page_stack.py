@@ -13,7 +13,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
 from PySide6.QtWidgets import QFrame, QPushButton, QVBoxLayout, QWidget
 
-from .constants import APP_NAME, APP_VERSION, ICON_FONT_FAMILY, ui_font
+from .constants import APP_NAME, APP_VERSION_SHORT, ICON_FONT_FAMILY, ui_font
 from .theme import ThemeAnimator, rgba, theme_for_page
 
 
@@ -262,7 +262,7 @@ class Sidebar(QFrame):
         ver_font.setLetterSpacing(QFont.AbsoluteSpacing, 0.6)
         painter.setFont(ver_font)
         ver_metrics = QFontMetrics(ver_font)
-        version = APP_VERSION.upper()
+        version = APP_VERSION_SHORT.upper()
         ver_w = ver_metrics.horizontalAdvance(version)
         painter.setPen(accent)
         painter.drawText(

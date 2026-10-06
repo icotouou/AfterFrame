@@ -40,7 +40,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .constants import APP_VERSION, HEADING_WEIGHT, ui_font
+from .constants import APP_VERSION_SHORT, HEADING_WEIGHT, ui_font
 
 # ---------------------------------------------------------------------------
 # Atmospheric speed-line effect (white / blue anime slash-burst style)
@@ -957,7 +957,7 @@ class SystemDashboard(QWidget):
         painter.setFont(label_font)
         painter.setPen(navy(150 * flick_b))
         painter.drawText(
-            QPointF(w - m - 128, m + 32), f"{APP_VERSION.upper()} // ACTIVE"
+            QPointF(w - m - 128, m + 32), f"{APP_VERSION_SHORT.upper()} // ACTIVE"
         )
         painter.setFont(tiny_font)
         painter.setPen(navy(95 * flick_a))

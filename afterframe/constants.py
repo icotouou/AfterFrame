@@ -152,12 +152,22 @@ APP_NAME = "AfterFrame"
 #
 # The two used to be independent literals -- __version__ said "0.1.0" while this said
 # "v1.0" -- and nothing read the former, so the interface quietly disagreed with the
-# package metadata and no test or check could notice. One source, one display form: bump
-# __version__ in afterframe/__init__.py and the corner of every page follows.
+# package metadata and no test or check could notice. One source, two display forms: bump
+# __version__ in afterframe/__init__.py and both of these follow.
 #
 # The "v" lives here because it is presentation: the interface puts it through .upper()
 # on the way out.
 APP_VERSION = "v" + __version__
+
+# The same version truncated to major.minor, for places that show it as decoration rather
+# than as information.
+#
+# The sidebar's vertical mark and the monitor page's corner stamp are set at a size where a
+# third component would either crowd the layout or be unreadable, and nobody reads a patch
+# number off a corner badge. The settings page's about row keeps the full APP_VERSION: that is
+# where someone looks to report which build they are running, so it is the one place a patch
+# release has to be visible.
+APP_VERSION_SHORT = "v" + ".".join(__version__.split(".")[:2])
 
 
 def no_window_kwargs() -> dict:

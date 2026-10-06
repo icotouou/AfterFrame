@@ -54,7 +54,7 @@ from PySide6.QtCore import (
 
 from .constants import (
     APP_NAME,
-    APP_VERSION,
+    APP_VERSION_SHORT,
     BACKGROUND_ALPHA,
     BACKGROUND_COLOR,
     BAR_COLOR,
@@ -2602,7 +2602,7 @@ class AfterFrameWindow(QWidget):
         version_font.setLetterSpacing(QFont.PercentageSpacing, 110)
 
         metrics = QFontMetrics(version_font)
-        text_width = metrics.horizontalAdvance(APP_VERSION)
+        text_width = metrics.horizontalAdvance(APP_VERSION_SHORT)
         text_height = metrics.height()
 
         text_pixmap = QPixmap(text_width, text_height)
@@ -2613,7 +2613,7 @@ class AfterFrameWindow(QWidget):
             QColor(*TEXT_SECONDARY_COLOR, int(130 * self._window_alpha))
         )
         text_painter.drawText(
-            0, 0, text_width, text_height, Qt.AlignCenter, APP_VERSION
+            0, 0, text_width, text_height, Qt.AlignCenter, APP_VERSION_SHORT
         )
         text_painter.end()
 
