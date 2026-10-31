@@ -156,6 +156,7 @@ $env:TMPDIR = "$PWD\_build_tmp\tmp"; $env:TEMP = $env:TMPDIR; $env:TMP = $env:TM
 
 # 2. 编译
 .\.venv\Scripts\python.exe -m nuitka --standalone --onefile `
+  --assume-yes-for-downloads `
   --windows-console-mode=disable `
   --windows-icon-from-ico=afterframe.ico `
   --include-data-file=afterframe.ico=afterframe.ico `
@@ -172,11 +173,21 @@ $env:TMPDIR = "$PWD\_build_tmp\tmp"; $env:TEMP = $env:TMPDIR; $env:TMP = $env:TM
 | 参数 | 不写会怎样 |
 |---|---|
 | `NUITKA_CACHE_DIR` | Nuitka 把编译器探测结果缓存到 `%LOCALAPPDATA%\Nuitka\...`。写入被拦时编译**直接失败**（`SConsLockFailure: Timeout waiting for lock`）。`%TEMP%` 同理：Nuitka 与它派生的 SCons、`cl.exe` 都要在那里建临时文件。这两个变量只对**当前 shell 会话**有效，换窗口要重设 |
+| `--assume-yes-for-downloads` | 缓存目录是空的时候，Nuitka 要联网取 Dependency Walker 并**等一个交互确认**；非交互环境（脚本、CI、被重定向的 shell）拿到默认答案「否」，于是**直接失败**（报错原文见下）。加上它才会自动下载并缓存到 `NUITKA_CACHE_DIR\downloads\`。**删掉 _build_tmp 就会重新触发**，所以这条在"清缓存后重编"时最容易踩 |
 | `--windows-console-mode=disable` | 运行时会弹一个黑色控制台窗口 |
 | `--windows-icon-from-ico` | exe 文件本身没有图标（**注意**：这只管 exe 图标，窗口图标是另一回事，见下） |
 | `--include-data-file` | `constants.resource_path()` 找不到 `afterframe.ico`，**窗口**与任务栏图标退回默认。两个图标参数管的是两件不同的事，都要写 |
 | `--enable-plugin=pyside6` | Qt 的 DLL 与插件不会被收集 |
 | `--include-qt-plugins=multimedia` | **静默降级**：Qt 找不到媒体后端，`QMediaPlayer` 不可用，于是封面取不到、搓碟退回模拟效果。**不报错** —— 见下 |
+
+#### 缓存为空又非交互时的报错
+
+```text
+FATAL: Nuitka does not work in '--mode=standalone' or '--mode=onefile' on Windows without dependency walker.
+```
+
+看到这句就是少了 `--assume-yes-for-downloads`，与编译器、Qt 都无关。缓存目录里一旦有了它，
+后续编译不再联网。
 
 #### 为什么 `--include-qt-plugins=multimedia` 必须显式写
 
