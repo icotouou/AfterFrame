@@ -713,7 +713,7 @@ class SettingsPage(QWidget):
         self._lyrics_fade_check.toggled.connect(self._on_lyrics_fade_toggled)
         return _SettingRow(
             "歌词淡出",
-            "可视化效果为音乐色彩时，非当前歌词淡出，只留形状；鼠标指向某句可临时恢复清晰",
+            "可视化效果为音乐色彩时，未唱到的歌词淡出只留形状；鼠标移上去则整个面板恢复清晰",
             self._lyrics_fade_check,
         )
 
